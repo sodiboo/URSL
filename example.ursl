@@ -1,0 +1,25 @@
+.str [ 'H' 'e' 'l' 'l' 'o' ',' 0x20 'W' 'o' 'r' 'l' 'd' ]
+.escape '\n'
+.num 0x20
+.nums [ 1 2 3 4 /* ... */ @MAX ]
+
+func $main {
+    const 0
+    call $fib
+    out %NUMB
+}
+
+func $fib 1 -> 1 {
+    get 0  const 0  eq branch :base_case
+    get 0  const 1  eq branch :base_case
+
+      get 0  const 1  sub call $fib
+      get 0  const 2  sub call $fib
+     add
+    ret
+
+    height 0
+    :base_case
+    get 0
+    ret
+}

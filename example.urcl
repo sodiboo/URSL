@@ -1,0 +1,44 @@
+PSH ~+2
+JMP .func_main
+HLT
+.data_str [ 72 101 108 108 111 44 32 87 111 114 108 100 ]
+.data_escape 10
+.data_num 32
+.data_nums [ 1 2 3 4 @MAX ]
+.func_fib
+LLOD $1 SP 0
+IMM $2 0
+BRE .label_3_9_fib_base_case $1 $2
+LLOD $1 SP 0
+IMM $2 1
+BRE .label_3_9_fib_base_case $1 $2
+LLOD $1 SP 0
+IMM $2 1
+SUB $1 $1 $2
+PSH ~+3
+PSH $1
+JMP .func_fib
+LLOD $2 SP 0
+IMM $3 2
+SUB $2 $2 $3
+PSH $1
+PSH ~+3
+PSH $2
+JMP .func_fib
+MOV $2 $1
+POP $1
+ADD $1 $1 $2
+ADD SP SP 1
+RET
+.label_3_9_fib_base_case
+LLOD $1 SP 0
+ADD SP SP 1
+RET
+.func_main
+IMM $1 0
+PSH ~+3
+PSH $1
+JMP .func_fib
+OUT %NUMB $1
+ADD SP SP 0
+RET
