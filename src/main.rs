@@ -1038,7 +1038,7 @@ fn std_instructions<'a>(
     inst! { inc 1 -> 1 { INC 1 1 } }
     inst! { dec 1 -> 1 { DEC 1 1 } }
 
-    inst! { carry 2 -> 1 { SETC 1 1 2 } }
+    inst! { carry 2 -> 1 { SETC 1 1 2 } branch { BRC :dest 1 2 } }
     inst! { neg 1 -> 1 { NEG 1 1 } }
 
     inst! { mult 2 -> 1 { MLT 1 1 2 } }

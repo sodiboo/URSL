@@ -99,12 +99,6 @@ POP R1
 // continue with the next instructions
 ```
 
-The locals for the entrypoint are assumed to contain zero at the program start, and are allocated in bulk, unlike all function locals which as seen above are always zero-initialized. When ``.entrypoint`` has 8 locals, the very first instruction may look something like this:
-
-```arm
-SUB SP SP 8
-```
-
 # Labels and jumps
 
 In URSL, instruction labels are marked with ``:`` prefix, and data labels with a ``.`` prefix. This allows easier differentiation, as the two kinds of labels are used quite differently, and in URSL they are not even interchangable.
@@ -117,18 +111,18 @@ Custom instructions are declared with the ``inst`` keyword, and they act like cu
 
 Custom instructions are not implemented in URSL, but in a syntax more similar to URCL. This functionality exists so that you can use new URCL instructions without needing me to add them to URSL, and for cases where you need lower level access to URCL. Also, most of the default instructions are defined in terms of  which allows URSL to have a smaller compiler that doesn't explicitly define how to emit boring instructions that only take a single line for the translation in this document.
 
-``urcl`` functions are not emitted exactly as the original code (some transformations do modify it, which i'll explain later), but all instructions are mapped one-to-one in outputted code in the same order.
+Custom instructions are not emitted exactly as the original code (some transformations do modify it, which i'll explain later), but all instructions are mapped one-to-one in outputted code in the same order.
 
-``urcl`` functions have the instruction/data label abstraction that URSL has, meaning that jumps look like ``JMP :label``, not ``JMP .label`` as in URCL. Every instruction in a URCL function can be labeled, and they are mangled in the output the same way as in other functions. An instruction can only have *one* label. Data labels can only appear as source operands, and instruction labels can only appear as destination operands.
+Custom instructions have the instruction/data label abstraction that URSL has, meaning that jumps look like ``JMP :label``, not ``JMP .label`` (as they do in URCL). Every instruction in a URCL function can be labeled, and they are converted into relatives for the output, since i didn't wanna deal with unique stateful mangled labels. An instruction can only have *one* label. Data labels can only appear as source operands, and instruction labels can only appear as destination operands.
 
-In ``urcl`` functions, there are 3 operand kinds: instruction label, immediate value, and registers. Immediate values are the same as the arguments to the ``const`` instruction in URSL. Memory locations are immediate values, and unlike in URCL, they cannot start with ``M``. They must be prefixed with ``#``. Same with registers, those are always ``$``. This allows me to make a simpler parser, because if ``R`` was allowed, then the instructions cannot be arbitary (i.e. they are parsed with a regex like ``\w+``), since it would cause an ambiguity whether an instruction has 3 operands or if it has 2 operands and a new instruction starts. Unlike URCL, in URSL all whitespace is equivalent, including newlines and comments, so i did not want to make ``urcl`` functions newline sensitive just because you want ``R``/``M`` prefixes.
+In custom instructions, there are 3 operand kinds: instruction label, immediate value, and registers. Immediate values are the same as the arguments to the ``const`` instruction in URSL. Memory locations are immediate values, and unlike in URCL, they cannot start with ``M``. They must be prefixed with ``#``. Same with registers, those are always ``$``. This allows me to make a simpler parser, because if ``R`` was allowed, then the instructions cannot be arbitary (i.e. they are parsed with a regex like ``\w+``), since it would cause an ambiguity whether an instruction has 3 operands or if it has 2 operands and a new instruction starts. Unlike URCL, in URSL all whitespace is equivalent, including newlines and comments, so i did not want to make the grammar newline sensitive just because you want ``R``/``M`` prefixes.
 
-Almost all ``urcl`` instructions take the form of ``OPCODE Destination Source`` or ``OPCODE Destination Source1 Source2``. ``Destination`` is either a register, or an instruction label. This allows arbitrary branch instructions that may be added to URCL in the future. By design, the URCL opcode really doesn't give the compiler any info except for the 3 special cases, so therefore if the destination must be allowed to be a label so ``BRZ :some_other_place $1`` would work. The source operand is either a register, or an immediate value. Immediate values include data labels.
+Almost all URCL(-like) instructions take the form of ``OPCODE Destination Source`` or ``OPCODE Destination Source1 Source2``. ``Destination`` is either a register, or an instruction label. This allows arbitrary branch instructions that may be added to URCL in the future. By design, the URCL opcode really doesn't give the compiler any info except for the 3 special cases, so therefore if the destination must be allowed to be a label so ``BRZ :some_other_place $1`` would work. The source operand is either a register, or an immediate value. Immediate values include data labels. URSL can be broken by jumping to a register within a custom instruction, because the compiler assumes that the destination being a register means it is a calculation, and the register being a label means it is a jump.
 
 There are three specially handled instructions:
 
-- ``IN $0 %PORT`` The source operand can be a port. The parser still allows it to be a generic instruction taking anything else as the source operands too. However, as a port, the destination must also be a register.
-- ``OUT %PORT $0`` The destination operand can be a port and exactly one source operand (of register or imm)
+- ``IN $0 %PORT`` The source operand can be a port. The parser still allows it to be a generic instruction taking anything else as the source operands too (i.e. ``IN $0 $0`` is a regular instruction that doesn't actually exist in URCL). However, when the source for ``IN`` is a port, the destination must be a register.
+- ``OUT %PORT $0`` The destination operand can be a port and if so, the instruction must have exactly one source operand (of register or imm)
 - ``JMP :label`` The destination can be a label, and this instruction can have zero source operands. This is the only instruction that does not have 2 or 3 operands that this URCL-based syntax supports.
 
 These rules are carefully chosen to intentionally leave out this functionality:
@@ -152,7 +146,7 @@ inst eq 2 -> 1 {
 
 The branch block is used when a custom instruction is used like ``eq branch :somewhere``. In this case, if there is a ``branch`` block, it will not use the main translation. These are translated together and only emits the contents of the branch block. In a branch block, return values are completely ignored, and it is called as if there are zero return values. The main special thing about branch blocks that makes them work is that they take an additional label parameter, which is the label in the ``branch`` instruction. Branch supporting instructions only return 1 value that should always be ``0`` or ``@MAX``, but the value is not enforced. However, the stack height *is* enforced.
 
-Now, the only thing remaining to be covered about these is the calling convention. Really, it's the same as custom instructions, except they may not use locals. ``urcl`` functions are inlined, and as such their parameters already lie in the registers. ``$0`` is always translated to the zero register, but ``$1`` is translated as the "excess height" plus one. The "excess height" is the number of additional stack entries (i.e. occupied registers), and ``$1`` refers to the first parameter to the function. If you have a function like ``urcl add 2 -> 1``, the two terms of the addition will be in ``$1`` and ``$2``. Reading registers higher than the amount of arguments may contain garbage data, as they are not cleared when they become unused. Since they are unused, you may write to them as temporary registers for whatever amount of work you need to do within. The return values of a ``urcl`` function are also stored in the lower registers. Since ``add`` returns 1, the return value is stored in ``$1`` and ``$2`` is free to store whatever temporary garbage you need while working on the ``add`` operation. A reasonable implementation of the ``add`` function may be like so:
+Now, the only thing remaining to be covered about these is the calling convention. Custom instructions are inlined, and as such their parameters already exist in the registers. ``$0`` is always translated to the zero register, but ``$1`` is translated as the "excess height" plus one. The "excess height" is the number of additional stack entries (i.e. occupied registers), so ``$1`` refers to the first parameter to the function. If you have a function like ``urcl add 2 -> 1``, the two terms of the addition will be in ``$1`` and ``$2``. Reading registers higher than the amount of arguments may contain garbage data, as they are not cleared when they become unused. Since they are unused, you may write to them as temporary registers for whatever work you need to do within. The return values of a ``urcl`` function are also stored in the lower registers. Since ``add`` returns 1, the return value is stored in ``$1`` and ``$2`` is free to store whatever temporary garbage you need while working on the ``add`` operation. A reasonable implementation of the ``add`` function may be like so:
 
 ```
 urcl add 2 -> 1 {
@@ -177,7 +171,7 @@ After an instruction that always manages control flow (such as ``ret``, ``ret``,
 This pushes a constant value (numeric/char literal like ``0``/``'\n'``, a macro value like ``@MAX``, a heap address like ``#0``, or a data label like ``.label``) onto the stack. In the future, i might add optimizations that ``const`` stack values are always translated to immediate values. This is the only instruction that accepts multiple operand types.
 
 ```arm
-IMM S1 operand
+IMM $1 operand
 ```
 
 ## ``dup`` 1 -> 2
@@ -185,7 +179,7 @@ IMM S1 operand
 This will copy the value on top of the stack, such that it appears twice.
 
 ```arm
-MOV S2 S1
+MOV $2 $1
 ```
 
 ## ``pop`` 1 -> 0
@@ -193,7 +187,7 @@ MOV S2 S1
 This will pop the top value off the stack, and discard it. In actual emitted output, this is a nop, since all it does is just decrease the (compile time) stack height and leave garbage in the next entry. However, this translation best captures the intent of what the instruction actually does.
 
 ```arm
-MOV R0 S1
+MOV $0 $1
 ```
 
 ## ``get 0`` -> 1
@@ -201,14 +195,14 @@ MOV R0 S1
 This will read the argument or local at the zero-indexed position given by the immediate operand. The immediate operand must be less than the sum of arguments and locals in scope.
 
 ```arm
-LLOD S1 SP operand
+LLOD $1 SP operand
 ```
 
 ## ``set 0`` 1 -> 0
-This will write to the argument or local at the zero-indexed position given by the immediate operand. The immediate operand must be less than the sum of arguments and locals in scope. You can also overwrite arguments, because the caller does not reuse those. If the target is core URCL instructions, this should use the first translation for ``LSTR`` with ``S2`` as the temporary register.
+This will write to the argument or local at the zero-indexed position given by the immediate operand. The immediate operand must be less than the sum of arguments and locals in scope. You can also overwrite arguments, because the caller does not reuse those. If the target is core URCL instructions, this should use the first translation for ``LSTR`` with ``$2`` as the temporary register.
 
 ```arm
-LSTR SP operand S1 
+LSTR SP operand $1 
 ```
 
 ## ``load`` 1 -> 1
@@ -216,7 +210,7 @@ LSTR SP operand S1
 This will load the value at the given address from the operand stack, and push it onto the stack.
 
 ```arm
-LOD S1 S1
+LOD $1 $1
 ```
 
 ## ``store`` 2 -> 0 (*A := B)
@@ -224,7 +218,7 @@ LOD S1 S1
 This will store the value at the top of the stack in the memory address below it.
 
 ```arm
-STR S1 S2
+STR $1 $2
 ```
 
 ## ``copy`` 2 -> 0 (*A := *B)
@@ -232,7 +226,7 @@ STR S1 S2
 This will copy the value from the address at the top of the stack and store it in the address below it.
 
 ```arm
-CPY S1 S2
+CPY $1 $2
 ```
 
 If you expected ``LSTR`` and ``LLOD`` equivalents here, sorry, i just couldn't think of a name i loved for them other than ``list.load`` and ``list.store``, but after figuring out how to omit ``.`` from every other instruction, i really didn't like these two outliers. You can always just use ``add``; ``load`` and ``add``; (value); ``store``. I'll be sure to eventually implement optimizations that convert those to ``LLOD`` and ``LSTR``
@@ -291,7 +285,7 @@ HLT
 Reads from a port.
 
 ```arm
-IN S1 %operand
+IN $1 %operand
 ```
 
 ## ``out %port`` 1 -> 0
@@ -299,7 +293,7 @@ IN S1 %operand
 Writes to a port.
 
 ```arm
-OUT %operand S1
+OUT %operand $1
 ```
 
 ## ``jump :dest``
@@ -315,7 +309,7 @@ JMP .operand // this label will be mangled in the output
 This conditionally branches to the label in the immediate operand. Unlike other instructions where the stack height must be at least the input height, here the stack height must be exactly that of the destination, plus 1 for the condition. This instruction will branch only if the operand on the stack is non-zero. This is the only conditional branch instruction in URSL, because it heavily simplifies the parser, and still allows for optimizations if the compiler can recognize the boolean expression given as the operand, and output the appropriate branch instruction.
 
 ```arm
-BNZ .operand S1 // this label will be mangled in the output
+BNZ .operand $1 // this label will be mangled in the output
 ```
 
 ## ``bool`` 1 -> 1 (A != 0)
@@ -323,13 +317,13 @@ BNZ .operand S1 // this label will be mangled in the output
 This normalizes a boolean value on top of the stack. If it is zero (false), it will push zero. Otherwise (nonzero, true) it will push the ones complement of zero. (all ones) This allows bitwise operators to work as boolean logic (most notably ``not``, the rest are the same for LSB representation). Although URSL doesn't actually have any types on its stack, in the future the compiler may be able to optimize to more specific instructions by internally keeping track of whether or not any given element is a boolean value. (i.e. the output of ``bool`` or one of the comparison instructions, or a boolean-safe instruction such as the bitwise instructions) The results of this can also be interpreted as the twos complement of 0 and 1. If/when i do implement such optimizations, ``bool`` on a boolean value will be a nop, and will be omitted from output if determined to do such, therefore i recommend you put ``bool`` for any value that will be part of a boolean condition (also improves code clarity of your actual intent, if nothing else)
 
 ```arm
-SETNE S1 S1 0
+SETNE $1 $1 0
 ```
 
 ## ``not`` 1 -> 1 (~A)
 
 ```arm
-NOT S1 S1
+NOT $1 $1
 ```
 
 ## ``xor`` 2 -> 1 (A ^ B)
@@ -337,26 +331,26 @@ NOT S1 S1
 Exclusive OR
 
 ```arm
-XOR S1 S1 S2
+XOR $1 $1 $2
 ```
 
 ## ``and`` 2 -> 1 (A & B)
 
 ```arm
-AND S1 S1 S2
+AND $1 $1 $2
 ```
 
 ## ``or`` 2 -> 1 (A | B)
 
 ```arm
-OR S1 S1 S2
+OR $1 $1 $2
 ```
 ## ``xnor`` 2 -> 1 (~(A ^ B))
 
 Exclusive NOR
 
 ```arm
-XNOR S1 S1 S2
+XNOR $1 $1 $2
 ```
 
 ## ``nand`` 2 -> 1 (~(A & B))
@@ -364,7 +358,7 @@ XNOR S1 S1 S2
 Not AND
 
 ```arm
-NAND S1 S1 S2
+NAND $1 $1 $2
 ```
 
 ## ``nor`` 2 -> 1 (~(A | B))
@@ -372,7 +366,7 @@ NAND S1 S1 S2
 Not OR
 
 ```arm
-NOR S1 S1 S2
+NOR $1 $1 $2
 ```
 
 ## ``carry`` 2 -> 1 (A + B > @MAX)
@@ -380,19 +374,19 @@ NOR S1 S1 S2
 Carry out of ``add`` operation. This takes two operands, adds them together, discards the result, but keeps the carry bit and extends it to every bit.
 
 ```arm
-SETC S1 S1 S2
+SETC $1 $1 $2
 ```
 
 ## ``add`` 2 -> 1 (A + B)
 
 ```arm
-ADD S1 S1 S2
+ADD $1 $1 $2
 ```
 
 ## ``sub`` 2 -> 1 (A - B)
 
 ```arm
-SUB S1 S1 S2
+SUB $1 $1 $2
 ```
 
 ## ``inc`` 1 -> 1 (A + 1)
@@ -400,13 +394,13 @@ SUB S1 S1 S2
 When writing URCL#, i didn't like how ``INC``, ``DEC`` in URCL translated to ``ldc 1`` and ``add``/``sub`` instructions in CIL. That's why i'm including ``inc``/``dec`` in URSL. Oh, and something about having nearly the same instructions as URCL plus stack-specific ones or something.
 
 ```arm
-INC S1 S1
+INC $1 $1
 ```
 
 ## ``dec`` 1 -> 1 (A - 1)
 
 ```arm
-DEC S1 S1
+DEC $1 $1
 ```
 
 ### ``neg`` 1 -> 1 (-A)
@@ -414,7 +408,7 @@ DEC S1 S1
 Two's complement. Equivalent to ``not`` followed by ``inc``.
 
 ```arm
-NEG S1 S1
+NEG $1 $1
 ```
 
 ## ``rsh`` 2 -> 1 (A >> B)
@@ -422,7 +416,7 @@ NEG S1 S1
 (Logical) right shift. This shifts ``A`` to the right ``B`` bits, filling in zeroes in the most significant bits.
 
 ```arm
-RSH S1 S1 S2
+RSH $1 $1 $2
 ```
 
 ## ``ash`` 2 -> 1 (A >> B)
@@ -430,7 +424,7 @@ RSH S1 S1 S2
 Arithmetic (right) shift. This shifts ``A`` to the right ``B`` bits, filling in the MSB of A in the most significant bits.
 
 ```arm
-SRS S1 S1 S2
+SRS $1 $1 $2
 ```
 
 ## ``lsh`` 2 -> 1 (A << B)
@@ -438,71 +432,71 @@ SRS S1 S1 S2
 (Logical) left shift. There is no arithmetic left shift, because it would be equivalent to logical left shift.
 
 ```arm
-LSH S1 S1 S2
+LSH $1 $1 $2
 ```
 
-## ``gt`` 2 -> 1 (A > B)
+## ``sgt`` 2 -> 1 (A > B)
 
 Signed greater than.
 
 ```arm
-SSETG S1 S1 S2
+SSETG $1 $1 $2
 ```
 
-## ``gte`` 2 -> 1 (A >= B)
+## ``sgte`` 2 -> 1 (A >= B)
 
 Signed greater than or equals.
 
 ```arm
-SSETGE S1 S1 S2
+SSETGE $1 $1 $2
 ```
 
-## ``lt`` 2 -> 1 (A < B)
+## ``slt`` 2 -> 1 (A < B)
 
 Signed less than.
 
 ```arm
-SSETL S1 S1 S2
+SSETL $1 $1 $2
 ```
 
-## ``lte`` 2 -> 1 (A <= B)
+## ``slte`` 2 -> 1 (A <= B)
 
 Signed less than or equals.
 
 ```arm
-SSETLE S1 S1 S2
+SSETLE $1 $1 $2
 ```
 
-## ``ungt`` 2 -> 1 (A > B)
+## ``gt`` 2 -> 1 (A > B)
 
 Unsigned greater than.
 
 ```arm
-SETG S1 S1 S2
+SETG $1 $1 $2
 ```
 
-## ``ungte`` 2 -> 1 (A >= B)
+## ``gte`` 2 -> 1 (A >= B)
 
 Unsigned greater than or equals.
 
 ```arm
-SETGE S1 S1 S2
+SETGE $1 $1 $2
 ```
 
-## ``unlt`` 2 -> 1 (A < B)
+## ``lt`` 2 -> 1 (A < B)
 
 Unsigned less than.
 
 ```arm
-SETL S1 S1 S2
+SETL $1 $1 $2
 ```
 
-## ``unlte`` 2 -> 1 (A <= B)
+## ``lte`` 2 -> 1 (A <= B)
 
 Unsigned less than or equals.
 
 ```arm
-SETLE S1 S1 S2
+SETLE $1 $1 $2
 ```
 
 ## ``eq`` 2 -> 1 (A == B)
@@ -510,7 +504,15 @@ SETLE S1 S1 S2
 Equality.
 
 ```arm
-SETE S1 S1 S2
+SETE $1 $1 $2
+```
+
+## ``ne`` 2 -> 1 (A != B)
+
+Inequality.
+
+```arm
+SETNE $1 $1 $2
 ```
 
 ## ``mult`` 2 -> 1 (A * B)
@@ -518,7 +520,7 @@ SETE S1 S1 S2
 Multiplication.
 
 ```arm
-MLT S1 S1 S2
+MLT $1 $1 $2
 ```
 
 ## ``div`` 2 -> 1 (A / B)
@@ -526,7 +528,7 @@ MLT S1 S1 S2
 Signed division.
 
 ```arm
-SDIV S1 S1 S2
+SDIV $1 $1 $2
 ```
 
 ## ``undiv`` 2 -> 1 (A / B)
@@ -534,7 +536,7 @@ SDIV S1 S1 S2
 Unsigned division.
 
 ```arm
-DIV S1 S1 S2
+DIV $1 $1 $2
 ```
 
 ## ``mod`` 2 -> 1 (A mod B)
@@ -542,7 +544,7 @@ DIV S1 S1 S2
 Signed modulo.
 
 ```arm
-SMOD S1 S1 S2
+SMOD $1 $1 $2
 ```
 
 ## ``unmod`` 2 -> 1 (A mod B)
@@ -550,5 +552,5 @@ SMOD S1 S1 S2
 Unsigned modulo.
 
 ```arm
-MOD S1 S1 S2
+MOD $1 $1 $2
 ```
