@@ -5,6 +5,7 @@ HLT
 .data_escape 10
 .data_num 32
 .data_nums [ 1 2 3 4 @MAX ]
+.data_vtable_or_something [ .func_func_fib ]
 .func_fib
 LLOD $1 SP 0
 IMM $2 0
@@ -35,10 +36,11 @@ LLOD $1 SP 0
 ADD SP SP 1
 RET
 .func_main
-IMM $1 0
+IMM $1 .func_fib
+IMM $2 20
 PSH ~+3
-PSH $1
-JMP .func_fib
+PSH $2
+JMP $1
 OUT %NUMB $1
 ADD SP SP 0
 RET

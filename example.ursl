@@ -2,10 +2,12 @@
 .escape '\n'
 .num 0x20
 .nums [ 1 2 3 4 /* ... */ @MAX ]
+.vtable_or_something [ $func_fib ]
 
 func $main {
-    const 0
-    call $fib
+    const $fib
+    const 20
+    icall 1 -> 1
     out %NUMB
 }
 

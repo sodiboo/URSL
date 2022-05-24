@@ -10,6 +10,8 @@
 
 Note that in this document, sequences where multiple "instructions" are written one after each other inline, they are formatted like ``inst``; ``inst`` with a semicolon separator, even if the language is supposed to use newlines to separate them.
 
+To use the compiler in this document, first [install rust](https://rustup.rs/), and then just do ``cargo run -- -i input.ursl -o output.urcl`` with the flags at the end there as you like. (``--`` tells cargo to stop parsing arguments, otherwise ``cargo run --help`` would give you help stuff for ``cargo run``) Do ``cargo run -- --help`` for all the goodies that you can customize. Binaries are not distributed in this repo, but you're free to compile it and do whatever with the resulting binaries.
+
 URSL is an abstraction which is somewhat higher than URCL. It is very similar to WASM text format and .NET CIL. URSL is a stack-oriented language with functions and label scopes within those functions. It is designed to be as easy as possible to compile to URCL, which is why for example memory instructions are literally 1:1 on URCL's available memory instructions. I plan on using this to compile languages such as .NET CIL and WASM to URCL. Stack machines allow for a simplified parser and binary representation of code, because instructions never take more than one immediate operand, and most only take from the operand stack. They are also somewhat easier to compile *to*, because it allows for very simple representation of nested expressions in reverse polish notation, and lowering of code can just translate to a set of stack instructions, without worrying about such things as temporary registers and using the correct available one, because URSL handles that and ensures a register is always available.
 
 Just like WASM text and CIL, instructions are written in lowercase. This helps it look sorta like URCL, but obviously different just by the casing. Oh, and also, most instructions are written as actual english words, because i think it's a lot nicer to read, and URSL's primary purpose isn't to be written by a human, so it's not a huge concern for instructions to be short and faster to write. Some are still abbreviated if their name is actually long, but i'm not keeping it to 3 chars.
@@ -64,7 +66,7 @@ If the stack was not empty such as with a height of 1, then all the registers wi
 Because of how functions work in regards to stack manipulation, they are implemented specially in URSL, and are not just label jumps with a return pointer.
 
 
-Functions are declared using a syntax like ``func $name args -> returns + locals``, where ``args``, ``returns``, ``locals`` are all numeric literals. The stack behaviour of calling a function is determined by the ``args -> returns`` part. The ``+ locals`` part is optional, defaulting to zero. The stack behaviour part is also optional, defaulting to zero also. That's nice especially for the ``$main`` function, which minimally is declared only as ``func $main { ret }``. The ``$main`` function must take zero arguments and return zero values. It can have locals, and it is the entrypoint of a URSL program. Additionally, if a function returns zero values, it can "fall out" of its block with an empty stack.
+Functions are declared using a syntax like ``func $name args -> returns + locals``, where ``args``, ``returns``, ``locals`` are all numeric literals. The stack behaviour of calling a function is determined by the ``args -> returns`` part. The ``+ locals`` part is optional, defaulting to zero. The stack behaviour part is also optional, defaulting to zero also. That's nice especially for the ``$main`` function, which minimally is declared only as ``func $main { ret }``. The ``$main`` function must take zero arguments and return zero values. It can have locals, and it is the entrypoint of a URSL program. Additionally, if a function returns zero values, it can "fall out" of its block with an empty stack. (i.e. the ``ret`` at the end is optional for zero-returning functions)
 
 Inside a function, the operand stack starts at height 0, and ``ret`` must have stack height equal to the return count. This makes ``ret`` pretty much translate directly to a URCL ``RET`` instruction when no locals need to be deallocated, with all the heavy lifting being done at the callsite.
 
@@ -75,12 +77,8 @@ When calling a function like ``call $example``, its input arguments is however m
 PSH R1
 PSH R2
 // return pointer
-PSH ~+7
-// arguments and locals are passed in reverse because SP points to arg 0, not last local
-// 3 locals (init to zero, might contain garbage)
-PSH 0
-PSH 0
-PSH 0
+PSH ~+4
+// arguments are passed in reverse because SP points to arg 0, locals are allocated within the function which allows function pointers without needing the locals to be part of the signature
 // 2 arguments being passed
 PSH R4
 PSH R3
@@ -97,6 +95,56 @@ MOV R3 R1
 POP R2
 POP R1
 // continue with the next instructions
+```
+
+# Function pointers
+
+You can use function pointers in URSL. Functions are "constant values", much like data labels, and can appear in the data section or inside a ``const`` instruction. This will load the value of its mangled label onto the stack, and erases the signature. You then *must* remember its signature externally, and you can call it with ``icall``. The ``icall`` instruction takes a function signature as an immediate argument, and it behaves exactly as ``call``, except it takes one more stack operand than the arguments. The arguments are at the top of the stack, and just below all of the arguments is the pointer to the function to call. Take for example, the stack height is 5, and you do ``icall 2 -> 3``. That will consume the top *3* stack operands, output 3 more and translate to the following URCL code:
+
+```
+// unload extra op stack entries to callstack. Notice that there are only two extras here, not (5 - 2) = 3, because R3 is the function pointer
+PSH R1
+PSH R2
+// return pointer
+PSH ~+4
+// 2 arguments being passed
+PSH R5
+PSH R4
+// call the function
+JMP R3
+// return from function: stack height is 5 but we need to get the extra 2 as well.
+// the return pointer was popped, so only our two extra operands are on the stack
+// we need to shift everything up 2 regs
+MOV R5 R3
+MOV R4 R2
+MOV R3 R1
+// and pop the last 2 operands
+POP R2
+POP R1
+// continue with the next instructions
+```
+
+It is important to put emphasis on the exact place a function pointer exists in. Take this example:
+
+```
+// arguments
+call $example
+```
+
+The equivalent indirect call is **NOT** this:
+
+```diff
+// arguments
+- const $example
+icall 0 -> 0
+```
+
+It is this:
+
+```diff
++ const $example
+// arguments
+icall 0 -> 0
 ```
 
 # Labels and jumps
@@ -168,26 +216,10 @@ After an instruction that always manages control flow (such as ``ret``, ``ret``,
 
 ## ``const 0`` -> 1
 
-This pushes a constant value (numeric/char literal like ``0``/``'\n'``, a macro value like ``@MAX``, a heap address like ``#0``, or a data label like ``.label``) onto the stack. In the future, i might add optimizations that ``const`` stack values are always translated to immediate values. This is the only instruction that accepts multiple operand types.
+This pushes a constant value (numeric/char literal like ``0``/``'\n'``, a macro value like ``@MAX``, a heap address like ``#0``, a data label like ``.label``, or a function pointer like ``$func``) onto the stack. In the future, i might add optimizations that ``const`` stack values are always translated to immediate values. This is the only instruction that accepts multiple operand types. And it's overloaded with a *lot* of types that you may wanna load.
 
 ```arm
 IMM $1 operand
-```
-
-## ``dup`` 1 -> 2
-
-This will copy the value on top of the stack, such that it appears twice.
-
-```arm
-MOV $2 $1
-```
-
-## ``pop`` 1 -> 0
-
-This will pop the top value off the stack, and discard it. In actual emitted output, this is a nop, since all it does is just decrease the (compile time) stack height and leave garbage in the next entry. However, this translation best captures the intent of what the instruction actually does.
-
-```arm
-MOV $0 $1
 ```
 
 ## ``get 0`` -> 1
@@ -205,47 +237,19 @@ This will write to the argument or local at the zero-indexed position given by t
 LSTR SP operand $1 
 ```
 
-## ``load`` 1 -> 1
-
-This will load the value at the given address from the operand stack, and push it onto the stack.
-
-```arm
-LOD $1 $1
-```
-
-## ``store`` 2 -> 0 (*A := B)
-
-This will store the value at the top of the stack in the memory address below it.
-
-```arm
-STR $1 $2
-```
-
-## ``copy`` 2 -> 0 (*A := *B)
-
-This will copy the value from the address at the top of the stack and store it in the address below it.
-
-```arm
-CPY $1 $2
-```
-
-If you expected ``LSTR`` and ``LLOD`` equivalents here, sorry, i just couldn't think of a name i loved for them other than ``list.load`` and ``list.store``, but after figuring out how to omit ``.`` from every other instruction, i really didn't like these two outliers. You can always just use ``add``; ``load`` and ``add``; (value); ``store``. I'll be sure to eventually implement optimizations that convert those to ``LLOD`` and ``LSTR``
-
 ## ``call $name``
-The stack behaviour of this instruction is that of the function being called. This is the most complex translation of all of URSL. The translation written here is python-ish pseudocode, because it isn't a simple substitution\*.
+
+The stack behaviour of this instruction is that of the function being called. This is the most complex translation of all of URSL. The translation written here is python-ish pseudocode, because it isn't a simple substitution.
 
 ```py
 # inclusive lower bound, exclusive upper bound (0..x means 0 <= i < x)
-target: { args, locs, returns }
+target: { args, returns }
 keep = height - target.args
 for i in 0..keep {
     PSH R{i + 1}
 }
 # directly after JMP
-PSH ~+{target.args + target.locs}
-for 0..(target.locs) {
-    PSH 0
-}
+PSH ~+{target.args + 1}
 # remember, first arg is pushed last (so it pops first)
 for i in reverse(keep..height) {
     PSH R{i + 1}
@@ -261,7 +265,9 @@ for i in reverse(0..keep) {
 }
 ```
 
-###### \* it is a simple substitution for ``inline`` functions
+## ``icall args -> returns``
+
+Calls a function from a function pointer on the stack, with the given signature. This allows for dynamic dispatch, like for virtual functions. The translation is pretty much the same as ```call`` except ``.target`` is the register at the top of ``keep``, so one less register will be kept
 
 ## ``ret``
 
@@ -306,11 +312,53 @@ JMP .operand // this label will be mangled in the output
 
 ## ``branch :dest`` 1 -> 0
 
-This conditionally branches to the label in the immediate operand. Unlike other instructions where the stack height must be at least the input height, here the stack height must be exactly that of the destination, plus 1 for the condition. This instruction will branch only if the operand on the stack is non-zero. This is the only conditional branch instruction in URSL, because it heavily simplifies the parser, and still allows for optimizations if the compiler can recognize the boolean expression given as the operand, and output the appropriate branch instruction.
+This conditionally branches to the label in the immediate operand. Unlike other instructions where the stack height must be at least the input height, here the (output) stack height must be exactly that of the destination. You cannot branch on the output of a function, or from a constant value. You must use an instruction that has a branching variant, like ``eq`` or ``bool``. **In the core instructions above, there are no branching instructions**.
+
+# Extra instructions
+
+The following instructions are not actually part of the core of the language, but are automatically inserted by the compiler prior to actually parsing your functions. You can turn this off with the ``--minimal`` parameter.
+
+## ``dup`` 1 -> 2
+
+This will copy the value on top of the stack, such that it appears twice.
 
 ```arm
-BNZ .operand $1 // this label will be mangled in the output
+MOV $2 $1
 ```
+
+## ``pop`` 1 -> 0
+
+This will pop the top value off the stack, and discard it. In actual emitted output, this is a nop, since all it does is just decrease the (compile time) stack height and leave garbage in the next entry. However, this translation best captures the intent of what the instruction actually does.
+
+```arm
+MOV $0 $1
+```
+
+## ``load`` 1 -> 1
+
+This will load the value at the given address from the operand stack, and push it onto the stack.
+
+```arm
+LOD $1 $1
+```
+
+## ``store`` 2 -> 0 (*A := B)
+
+This will store the value at the top of the stack in the memory address below it.
+
+```arm
+STR $1 $2
+```
+
+## ``copy`` 2 -> 0 (*A := *B)
+
+This will copy the value from the address at the top of the stack and store it in the address below it.
+
+```arm
+CPY $1 $2
+```
+
+If you expected ``LSTR`` and ``LLOD`` equivalents here, sorry, i just couldn't think of a name i loved for them other than ``list.load`` and ``list.store``, but after figuring out how to omit ``.`` from every other instruction, i really didn't like these two outliers. You can always just use ``add``; ``load`` and ``add``; (value); ``store``. I'll be sure to eventually implement optimizations that convert those to ``LLOD`` and ``LSTR``
 
 ## ``bool`` 1 -> 1 (A != 0)
 

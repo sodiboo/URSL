@@ -244,17 +244,19 @@ pub enum Literal<'a> {
     Num(u64),
     Mem(u64),
     Label(&'a str),
+    Func(&'a str),
 }
 
 impl Display for Literal<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         match self {
-            Self::Char(ch) => write!(f, "'{}'", ch),
-            Self::CharEscape(ch) => write!(f, "'\\{}'", ch),
-            Self::Macro(name) => write!(f, "@{}", name),
-            Self::Num(n) => write!(f, "{}", n),
-            Self::Mem(addr) => write!(f, "#{}", addr),
-            Self::Label(name) => write!(f, ".{}", name),
+            Self::Char(ch) => write!(f, "'{ch}'"),
+            Self::CharEscape(ch) => write!(f, "'\\{ch}'"),
+            Self::Macro(name) => write!(f, "@{name}"),
+            Self::Num(n) => write!(f, "{n}"),
+            Self::Mem(addr) => write!(f, "#{addr}"),
+            Self::Label(name) => write!(f, ".{}", super::mangle_data_label(name)),
+            Self::Func(name) => write!(f, ".{}", super::mangle_function_name(name)),
         }
     }
 }
@@ -271,6 +273,7 @@ pub enum Instruction<'a> {
     Halt,
 
     Call(&'a str),
+    IndirectCall(StackBehaviour),
     Ret,
 
     Get(u64),
@@ -291,6 +294,7 @@ impl Display for Instruction<'_> {
             Self::Halt => write!(f, "halt"),
 
             Self::Call(op) => write!(f, "call {op}"),
+            Self::IndirectCall(stack) => write!(f, "icall {stack}"),
             Self::Ret => write!(f, "ret"),
 
             Self::Get(op) => write!(f, "get {op}"),

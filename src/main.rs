@@ -21,19 +21,19 @@ struct Args {
     #[clap(short, long = "output-file")]
     output: String,
 
-    /// Parses escape sequences and emits the exact codepoint in the output. This will break some URCL compilers since the URCL code can contain null bytes and newlines in char literals.
+    /// Parses escape sequences and emits the exact codepoint in the output. This will break some URCL compilers since the URCL code can then contain null bytes and newlines in char literals.
     #[clap(short = 'c', long)]
     emit_chars_literally: bool,
 
-    /// Emits char literals as numeric literals corresponding to their char codes. This should work with all URCL compilers.
+    /// Emits char literals as numeric literals corresponding to their char codes. This should work with all URCL compilers. Both -c or -C are optional, and without either, char literals are left alone. URCL does not officially support char literals, which is why these are useful
     #[clap(short = 'C', long)]
     emit_chars_as_numbers: bool,
 
-    /// Log lowering of code before translation to URCL, and include additional details in comments in code output.
+    /// Print lowering of code before translation to URCL, and include additional details in comments in code output.
     #[clap(short, long)]
     verbose: bool,
 
-    /// Allocates locals in bulk by subtracting the desired amount from the stack pointer. By default, they are overwritten to be zero when used. Bulk allocation will be somewhat faster, especially with many locals, but changes code behaviour. This is an optimization that is only safe when your code definitely assigns before reading.
+    /// Allocates locals in bulk by subtracting the desired amount from the stack pointer. By default, they are overwritten to be zero when used. Bulk allocation will be somewhat faster, especially with many locals, but changes code behaviour. This is an optimization that is only safe when your code definitely assigns locals before reading them.
     #[clap(long)]
     garbage_initialized_locals: bool,
 
@@ -64,25 +64,11 @@ fn parse_literal<'a>(node: Node, source: &'a str) -> Literal<'a> {
                 }
             }
         }
-        "number" => {
-            let text = node.text(source);
-            Literal::Num(parse_num(text))
-        }
-        "macro" => {
-            let name = node.field("name");
-            let text = name.text(source);
-            Literal::Macro(text)
-        }
-        "mem" => {
-            let name = node.field("address");
-            let text = name.text(source);
-            Literal::Mem(text.parse::<u64>().unwrap())
-        }
-        "data_label" => {
-            let name = node.field("name");
-            let text = name.text(source);
-            Literal::Label(text)
-        }
+        "number" => Literal::Num(parse_num(node.text(source))),
+        "macro" => Literal::Macro(&node.text(source)[1..]), // trim @
+        "data_label" => Literal::Label(&node.text(source)[1..]), // trim .
+        "function_name" => Literal::Func(&node.text(source)[1..]), // trim $
+        "mem" => Literal::Mem(node.text(source)[1..].parse::<u64>().unwrap()), // trim #
         _ => {
             panic!("Invalid value for literal, maybe the source file contained an error or extra node? Error at {}", node.pos());
         }
@@ -178,9 +164,7 @@ fn main() -> io::Result<()> {
             panic!("File parsed to an empty syntax tree. Am i a joke to you?");
         }
         while cursor.node().kind() == "definition" {
-            let label_node = cursor.node().field("label");
-            let label_name = label_node.field("name");
-            let label = label_name.text(&source);
+            let label = &cursor.node().field("label").text(&source)[1..]; // trim .
             let value_node = cursor.node().field("value");
             let value: DefValue = match value_node.kind() {
                 "array" => {
@@ -245,6 +229,31 @@ fn main() -> io::Result<()> {
             assert!(!instructions.is_empty()); // empty instruction lists are only allowed for -> 0, and parsing normalizes them to end with a ret
             let name = &func.name[1..]; // trim $ prefix
             writeln!(f, ".{}", mangle_function_name(name))?;
+            if args.garbage_initialized_locals {
+                if func.stack.input != 0 {
+                    writeln!(f, "SUB SP SP {locals}")?;
+                }
+            } else {
+                for _ in 0..locals {
+                    writeln!(f, "PSH 0")?;
+                }
+            }
+            let map_loc = |idx| {
+                // this is really just (idx - func.stack.input) % (func.stack.input + locals)
+                // but i think this is cleaner?
+                // this is required because, for function pointers to work, the function needs to allocate its own locals
+                // and with that, the locals are at the bottom, so that it doesn't have to move arguments to make space for locals
+                // but i didn't wanna change behaviour since i quite like `get 0` being arg 0
+                // however, the actual output still needs to bend around the new memory layout
+                // which is why this closure exists
+                if idx < func.stack.input {
+                    // idx is referring to an arg
+                    idx + locals
+                } else {
+                    // idx is referring to a local
+                    idx - func.stack.input
+                }
+            };
             for entry in instructions {
                 if args.verbose {
                     write!(f, "// +{}; {} -> ", entry.excess_height, entry.enter_height)?;
@@ -307,8 +316,8 @@ fn main() -> io::Result<()> {
                     }
                     Instruction::Halt => writeln!(f, "HLT")?,
                     Instruction::Const(ref lit) => writeln!(f, "IMM ${r1} {lit}")?,
-                    Instruction::Get(idx) => writeln!(f, "LLOD ${r1} SP {idx}")?,
-                    Instruction::Set(idx) => writeln!(f, "LSTR SP {idx} ${r1}")?,
+                    Instruction::Get(idx) => writeln!(f, "LLOD ${r1} SP {}", map_loc(idx))?,
+                    Instruction::Set(idx) => writeln!(f, "LSTR SP {} ${r1}", map_loc(idx))?,
                     Instruction::In(port) => writeln!(f, "IN ${r1} %{port}")?,
                     Instruction::Out(port) => writeln!(f, "OUT %{port} ${r1}")?,
                     Instruction::Jump(label) => {
@@ -335,7 +344,7 @@ fn main() -> io::Result<()> {
                                 FunctionBody::Urcl {
                                     ref instructions, ..
                                 } => emit_inline(&mut f, instructions, None)?,
-                                FunctionBody::Ursl { locals, .. } => {
+                                FunctionBody::Ursl { .. } => {
                                     if args.verbose {
                                         writeln!(f, "// begin call {}", func.name)?;
                                     }
@@ -347,25 +356,7 @@ fn main() -> io::Result<()> {
                                         "PSH ~+{}", // return pointer
                                         // 2 because of the jump, and we want the inst *after* that
                                         2 + func.stack.input
-                                            + match locals {
-                                                0 => 0,
-                                                n =>
-                                                    if args.garbage_initialized_locals {
-                                                        1
-                                                    } else {
-                                                        n
-                                                    },
-                                            }
                                     )?;
-                                    if locals != 0 {
-                                        if args.garbage_initialized_locals {
-                                            writeln!(f, "SUB SP SP {locals}")?;
-                                        } else {
-                                            for _ in 0..locals {
-                                                writeln!(f, "PSH 0")?;
-                                            }
-                                        }
-                                    }
                                     for i in 1..=func.stack.input {
                                         writeln!(f, "PSH ${}", excess_height + i)?;
                                     }
@@ -388,6 +379,37 @@ fn main() -> io::Result<()> {
                             panic!("Already checked that func exists. This should be unreachable.")
                         }
                     }
+                    Instruction::IndirectCall(stack) => {
+                        let func = excess_height + 1;
+                        if args.verbose {
+                            writeln!(f, "// begin icall {stack}")?;
+                        }
+                        for i in 1..=excess_height {
+                            writeln!(f, "PSH ${i}")?;
+                        }
+                        writeln!(
+                            f,
+                            "PSH ~+{}", // return pointer
+                            // 2 because of the jump, and we want the inst *after* that
+                            2 + stack.input
+                        )?;
+                        for i in 1..=stack.input {
+                            writeln!(f, "PSH ${}", func + i)?;
+                        }
+                        writeln!(f, "JMP ${func}")?;
+
+                        if args.verbose {
+                            writeln!(f, "// return from icall")?;
+                        }
+                        if excess_height != 0 {
+                            for i in 1..=stack.output {
+                                writeln!(f, "MOV ${} ${i}", i + excess_height)?;
+                            }
+                            for i in (1..=excess_height).rev() {
+                                writeln!(f, "POP ${i}")?;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -396,13 +418,17 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-fn parse_stack(node: Node, source: &str) -> StackBehaviour {
+fn parse_stack_sig(node: Node, source: &str) -> StackBehaviour {
     match node.child_by_field_name("stack") {
-        Some(node) => StackBehaviour {
-            input: parse_num(node.field("params").text(source)),
-            output: parse_num(node.field("returns").text(source)),
-        },
+        Some(node) => parse_stack(node, source),
         None => stack!(0; -> 0),
+    }
+}
+
+fn parse_stack(node: Node, source: &str) -> StackBehaviour {
+    StackBehaviour {
+        input: parse_num(node.field("params").text(source)),
+        output: parse_num(node.field("returns").text(source)),
     }
 }
 
@@ -422,7 +448,7 @@ fn parse_label<'a, T: PositionEntry>(
 ) -> Option<&'a str> {
     match inst.child_by_field_name("label") {
         Some(node) => {
-            let label = Some(node.field("name").text(source));
+            let label = Some(&node.text(source)[1..]); // trim :
             if let Some(label) = &label {
                 if let Some(idx) = labels.get(label) {
                     panic!(
@@ -458,9 +484,9 @@ fn parse_functions<'a>(
         let node = cursor.node();
         match node.kind() {
             "func" => {
-                let stack = parse_stack(node, source);
+                let stack = parse_stack_sig(node, source);
                 let locals = parse_locals(node, source);
-                let name = node.field("name").text(source);
+                let name = node.field("name").text(source); // don't trim $, that way it doesn't collide with insts
                 functions.insert(
                     name,
                     Function {
@@ -477,7 +503,7 @@ fn parse_functions<'a>(
                 nodes.insert(name, node.field("instructions"));
             }
             "inst" => {
-                let stack = parse_stack(node, source);
+                let stack = parse_stack_sig(node, source);
                 let name = node.field("name").text(source);
                 if ["halt", "ret"].contains(&name) {
                     panic!("inst {name} at {} is also defined as intrinsic", node.pos());
@@ -493,7 +519,7 @@ fn parse_functions<'a>(
                         &branch_clause.field("instructions"),
                         name,
                         source,
-                        Some(branch_clause.field("label").field("name").text(source)),
+                        Some(&branch_clause.field("label").text(source)[1..]), // trim :
                     )
                 });
                 let is_branch = branch.is_some();
@@ -613,6 +639,9 @@ fn parse_instructions<'a>(
             () => {
                 inst.field("operand")
             };
+            (stack) => {
+                parse_stack(op!(), source)
+            };
             (num) => {
                 parse_num(op!().text(source))
             };
@@ -623,10 +652,10 @@ fn parse_instructions<'a>(
                 op!().text(source)
             };
             (label) => {
-                op!().field("name").text(source)
+                &op!().text(source)[1..] // trim :
             };
             (port) => {
-                op!().field("name").text(source)
+                &op!().text(source)[1..] // trim %
             };
             (loc) => {{
                 let idx = op!(num);
@@ -688,6 +717,10 @@ fn parse_instructions<'a>(
                 });
                 inst!(Instruction::Call(operand); stack)
             }
+            "icall" => {
+                let stack = op!(stack);
+                inst!(Instruction::IndirectCall(stack); stack!(stack.input + 1; -> stack.output))
+            }
             "get" => inst!(Instruction::Get(op!(loc)); 0 -> 1),
             "set" => inst!(Instruction::Set(op!(loc)); 1 -> 0),
 
@@ -701,36 +734,24 @@ fn parse_instructions<'a>(
                 instruction: Instruction::Jump(op!(label)),
                 pos: inst.pos(),
             }),
-            // Branch is special, but it was an afterthought, which is why this is so messy
-            // (originally just JNZ but i figured that's very inefficient to always do things like SETG before JNZ)
-            // TODO: rewrite the grammar so this is maybe nicer and doesn't rely on mutable state?
-            "branch" => inst! { height => {
-                if label.is_some() {
-                    panic!("Cannot directly label a branch instruction at {}, must put it on the prefix instruction", inst.pos());
-                }
-                if let Some(entry) = instructions.pop() {
-                    if let Instruction::Call(func) = entry.instruction {
-                        if let Some((_, has_branch)) = signatures.get(func) {
-                            if *has_branch {
-                                InstructionEntry {
-                                    label: entry.label,
-                                    pos: entry.pos,
-                                    enter_height: entry.enter_height,
-                                    excess_height: entry.excess_height,
-                                    exit_height: Some(height.checked_sub(1).unwrap_or_else(|| panic!("Stack underflow at {}", inst.pos()))),
-                                    instruction: Instruction::Branch(func, op!(label))
-                                }
-                            } else {
-                                panic!("Branch following instruction without a branching variant at {}", inst.pos());
-                            }
-                        } else {
-                            panic!("Unknown instruction prior to branch. This should be impossible? (at {})", inst.pos());
-                        }
-                    } else {
-                        panic!("Branch following instruction without a branching variant at {}", inst.pos())
+            "branch" => inst! { enter_height => {
+                let opcode = inst.field("opcode").text(source);
+                if let Some((stack, branching)) = signatures.get(opcode) {
+                    if !branching {
+                        panic!("Branch following instruction without a branching variant at {}", inst.pos());
+                    }
+                    assert_eq!(stack.output, 1);
+                    let excess_height = enter_height.checked_sub(stack.input).unwrap_or_else(|| panic!("Stack underflow at {}", inst.pos()));
+                    InstructionEntry {
+                        label,
+                        enter_height,
+                        excess_height,
+                        exit_height: Some(excess_height),
+                        instruction: Instruction::Branch(opcode, op!(label)),
+                        pos: inst.pos(),
                     }
                 } else {
-                    panic!("Branch without prefix at {}", inst.pos());
+                    panic!("Branch with undefined instruction at {}", inst.pos())
                 }
             }},
             // This is matching a node kind. All of the above are special in the grammar, because of operands, and their node kind matches the instruction.
@@ -848,15 +869,15 @@ fn parse_urcl_instructions<'a>(
             instruction: match inst.kind() {
                 "jmp" => UrclInstruction::Jmp {
                     dest: UrclBranchDestination::TemporaryLabel(
-                        inst.field("dest").field("name").text(source),
+                        &inst.field("dest").text(source)[1..], // trim :
                     ),
                 },
                 "urcl_in" => UrclInstruction::In {
                     dest: reg(inst.field("dest")),
-                    port: inst.field("source").field("name").text(source),
+                    port: &inst.field("source").text(source)[1..], // trim %
                 },
                 "urcl_out" => UrclInstruction::Out {
-                    port: inst.field("dest").field("name").text(source),
+                    port: &inst.field("dest").text(source)[1..], // trim %
                     source: parse_urcl_source(args, inst.field("source"), source),
                 },
                 "urcl_instruction" => {
@@ -871,7 +892,7 @@ fn parse_urcl_instructions<'a>(
                             dest.field("idx").text(source).parse::<u64>().unwrap(),
                         ),
                         "inst_label" => UrclDestination::Branch(
-                            UrclBranchDestination::TemporaryLabel(dest.field("name").text(source)),
+                            UrclBranchDestination::TemporaryLabel(dest.text(source)),
                         ),
                         _ => panic!("Unknown dest node type at {}", dest.pos()),
                     };
@@ -967,11 +988,14 @@ fn std_instructions<'a>(
         (i $inst:ident :dest $($s:tt)*) => {
             inst!(p { $inst (UrclDestination::Branch(UrclBranchDestination::BranchLabel)) } $($s)*)
         };
-        (i $inst:ident $r:literal $($s:tt)*) => {
+        (i $inst:ident R($r:literal) $($s:tt)*) => {
             inst!(p { $inst (UrclDestination::Register($r)) } $($s)*)
         };
-        (s ($($t:tt)*) $s:literal $($r:tt)*) => {
+        (s ($($t:tt)*) R($s:literal) $($r:tt)*) => {
             inst!(p { $($t)* (UrclSource::Register($s)) } $($r)*)
+        };
+        (s ($($t:tt)*) $s:literal $($r:tt)*) => {
+            inst!(p { $($t)* (UrclSource::Literal(Literal::Num($s))) } $($r)*)
         };
         (s ($($t:tt)*) @$s:ident $($r:tt)*) => {
             inst!(p { $($t)* (UrclSource::Literal(Literal::Macro(stringify!($s)))) } $($r)*)
@@ -1010,60 +1034,60 @@ fn std_instructions<'a>(
         (br $($i:tt)+ ) => { (true, Some(inst!(e $($i)+))) };
     }
 
-    inst!(dup 1 -> 2 { MOV 2 1 });
+    inst!(dup 1 -> 2 { MOV R(2) R(1) });
     // pop is a compile-time operation that only modifies stack height, as anything in unused regs are just garbage
     inst! { pop 1 -> 0 { } }
     // nop doesn't need to map to NOP, since URCL is apparently supposed to support multiple labels per instruction [citation needed]
     inst! { nop 0 -> 0 { } }
 
-    inst! { load 1 -> 1 { LOD 1 1 } }
-    inst! { store 2 -> 0 { STR 1 2 } }
-    inst! { copy 2 -> 0 { CPY 1 2 } }
+    inst! { load 1 -> 1 { LOD R(1) R(1) } }
+    inst! { store 2 -> 0 { STR R(1) R(2) } }
+    inst! { copy 2 -> 0 { CPY R(1) R(2) } }
 
-    inst! { bool 1 -> 1 { SETNZ 1 1 } branch { BNZ :dest 1 2 } }
-    inst! { not 1 -> 1 { NOT 1 1 } branch { BRE :dest 1 @MAX } }
+    inst! { bool 1 -> 1 { SETNZ R(1) R(1) } branch { BNZ :dest R(1) R(2) } }
+    inst! { not 1 -> 1 { NOT R(1) R(1) } branch { BRE :dest R(1) 0 } }
 
-    inst! { xor 2 -> 1 { XOR 1 1 2 } }
-    inst! { xnor 2 -> 1 { XNOR 1 1 2 } }
+    inst! { xor 2 -> 1 { XOR R(1) R(1) R(2) } }
+    inst! { xnor 2 -> 1 { XNOR R(1) R(1) R(2) } }
 
-    inst! { and 2 -> 1 { AND 1 1 2 } }
-    inst! { nand 2 -> 1 { NAND 1 1 2 } }
+    inst! { and 2 -> 1 { AND R(1) R(1) R(2) } }
+    inst! { nand 2 -> 1 { NAND R(1) R(1) R(2) } }
 
-    inst! { or 2 -> 1 { OR 1 1 2 } }
-    inst! { nor 2 -> 1 { NOR 1 1 2 } }
+    inst! { or 2 -> 1 { OR R(1) R(1) R(2) } }
+    inst! { nor 2 -> 1 { NOR R(1) R(1) R(2) } }
 
-    inst! { add 2 -> 1 { ADD 1 1 2 } }
-    inst! { sub 2 -> 1 { SUB 1 1 2 } }
+    inst! { add 2 -> 1 { ADD R(1) R(1) R(2) } }
+    inst! { sub 2 -> 1 { SUB R(1) R(1) R(2) } }
 
-    inst! { inc 1 -> 1 { INC 1 1 } }
-    inst! { dec 1 -> 1 { DEC 1 1 } }
+    inst! { inc 1 -> 1 { INC R(1) R(1) } }
+    inst! { dec 1 -> 1 { DEC R(1) R(1) } }
 
-    inst! { carry 2 -> 1 { SETC 1 1 2 } branch { BRC :dest 1 2 } }
-    inst! { neg 1 -> 1 { NEG 1 1 } }
+    inst! { carry 2 -> 1 { SETC R(1) R(1) R(2) } branch { BRC :dest R(1) R(2) } }
+    inst! { neg 1 -> 1 { NEG R(1) R(1) } }
 
-    inst! { mult 2 -> 1 { MLT 1 1 2 } }
-    inst! { sdiv 2 -> 1 { SDIV 1 1 2 } }
-    inst! { div 2 -> 1 { DIV 1 1 2 } }
-    inst! { mod 2 -> 1 { MOD 1 1 2 } }
+    inst! { mult 2 -> 1 { MLT R(1) R(1) R(2) } }
+    inst! { sdiv 2 -> 1 { SDIV R(1) R(1) R(2) } }
+    inst! { div 2 -> 1 { DIV R(1) R(1) R(2) } }
+    inst! { mod 2 -> 1 { MOD R(1) R(1) R(2) } }
 
-    inst! { rsh 1 -> 1 { RSH 1 1 } }
-    inst! { ash 1 -> 1 { SRS 1 1 } }
-    inst! { lsh 1 -> 1 { LSH 1 1 } }
+    inst! { rsh 1 -> 1 { RSH R(1) R(1) } }
+    inst! { ash 1 -> 1 { SRS R(1) R(1) } }
+    inst! { lsh 1 -> 1 { LSH R(1) R(1) } }
 
-    inst! { brsh 2 -> 1 { BSR 1 1 2 } }
-    inst! { bash 2 -> 1 { BSS 1 1 2 } }
-    inst! { blsh 2 -> 1 { BSL 1 1 2 } }
+    inst! { brsh 2 -> 1 { BSR R(1) R(1) R(2) } }
+    inst! { bash 2 -> 1 { BSS R(1) R(1) R(2) } }
+    inst! { blsh 2 -> 1 { BSL R(1) R(1) R(2) } }
 
-    inst! { eq 2 -> 1 { SETE 1 1 2 } branch { BRE :dest 1 2 } }
-    inst! { ne 2 -> 1 { SETNE 1 1 2 } branch { BNE :dest 1 2 } }
+    inst! { eq 2 -> 1 { SETE R(1) R(1) R(2) } branch { BRE :dest R(1) R(2) } }
+    inst! { ne 2 -> 1 { SETNE R(1) R(1) R(2) } branch { BNE :dest R(1) R(2) } }
 
-    inst! { sgt 2 -> 1 { SSETG 1 1 2 } branch { SBRG :dest 1 2 } }
-    inst! { sgte 2 -> 1 { SSETGE 1 1 2 } branch { SBGE :dest 1 2 } }
-    inst! { slt 2 -> 1 { SSETL 1 1 2 } branch { SBRL :dest 1 2 } }
-    inst! { slte 2 -> 1 { SSETLE 1 1 2 } branch { SBLE :dest 1 2 } }
+    inst! { sgt 2 -> 1 { SSETG R(1) R(1) R(2) } branch { SBRG :dest R(1) R(2) } }
+    inst! { sgte 2 -> 1 { SSETGE R(1) R(1) R(2) } branch { SBGE :dest R(1) R(2) } }
+    inst! { slt 2 -> 1 { SSETL R(1) R(1) R(2) } branch { SBRL :dest R(1) R(2) } }
+    inst! { slte 2 -> 1 { SSETLE R(1) R(1) R(2) } branch { SBLE :dest R(1) R(2) } }
 
-    inst! { gt 2 -> 1 { SETG 1 1 2 } branch { BRG :dest 1 2 } }
-    inst! { gte 2 -> 1 { SETGE 1 1 2 } branch { BGE :dest 1 2 } }
-    inst! { lt 2 -> 1 { SETL 1 1 2 } branch { BRL :dest 1 2 } }
-    inst! { lte 2 -> 1 { SETLE 1 1 2 } branch { BLE :dest 1 2 } }
+    inst! { gt 2 -> 1 { SETG R(1) R(1) R(2) } branch { BRG :dest R(1) R(2) } }
+    inst! { gte 2 -> 1 { SETGE R(1) R(1) R(2) } branch { BGE :dest R(1) R(2) } }
+    inst! { lt 2 -> 1 { SETL R(1) R(1) R(2) } branch { BRL :dest R(1) R(2) } }
+    inst! { lte 2 -> 1 { SETLE R(1) R(1) R(2) } branch { BLE :dest R(1) R(2) } }
 }
