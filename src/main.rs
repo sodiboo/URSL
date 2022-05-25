@@ -338,6 +338,9 @@ fn main() -> io::Result<()> {
                             panic!("Already checked that func exists. This should be unreachable.")
                         }
                     }
+                    Instruction::Perm(ref perm) => {
+                        emit_inline(&mut f, &compile_permutation(perm, entry.pos), None)?;
+                    }
                     Instruction::Call(func) => {
                         if let Some(func) = functions.get(func) {
                             match func.body {
@@ -432,6 +435,42 @@ fn parse_stack(node: Node, source: &str) -> StackBehaviour {
     }
 }
 
+fn parse_permutation(node: Node, source: &str) -> Permutation {
+    assert_eq!(node.kind(), "permutation");
+    let mut cursor = node.walk();
+    let mut inputs = HashMap::new();
+    for (i, node) in node
+        .field("input")
+        .children_by_field_name("items", &mut cursor)
+        .enumerate()
+    {
+        let name = node.text(source);
+        if let Some(&(other, _)) = inputs.get(name) {
+            panic!(
+                "Duplicate identifier in permutation input at {other} and {}",
+                node.pos()
+            );
+        }
+        inputs.insert(name, (node.pos(), i as u64));
+    }
+
+    Permutation {
+        input: inputs.len() as u64,
+        output: node
+            .field("output")
+            .children_by_field_name("items", &mut cursor)
+            .map(|node| {
+                let name = node.text(source);
+                if let Some(&(_, index)) = inputs.get(name) {
+                    index
+                } else {
+                    panic!("Unknown identifier in permutation output at {}", node.pos());
+                }
+            })
+            .collect(),
+    }
+}
+
 fn parse_locals(node: Node, source: &str) -> u64 {
     match node.child_by_field_name("locals") {
         Some(node) => parse_num(node.text(source)),
@@ -490,7 +529,7 @@ fn parse_functions<'a>(
                 functions.insert(
                     name,
                     Function {
-                        name: name,
+                        name,
                         stack,
                         body: FunctionBody::Ursl {
                             locals,
@@ -532,7 +571,7 @@ fn parse_functions<'a>(
                 functions.insert(
                     name,
                     Function {
-                        name: name,
+                        name,
                         stack,
                         body: FunctionBody::Urcl {
                             instructions,
@@ -542,6 +581,25 @@ fn parse_functions<'a>(
                     },
                 );
                 signatures.insert(name, (stack, is_branch));
+            }
+            "inst_permutation" => {
+                let name = node.field("name").text(source);
+                let perm = parse_permutation(node.field("permutation"), source);
+                let instructions = compile_permutation(&perm, node.pos());
+                let stack = stack!(perm.input; -> perm.output.len() as u64);
+                functions.insert(
+                    name,
+                    Function {
+                        name,
+                        stack,
+                        body: FunctionBody::Urcl {
+                            instructions,
+                            branch: None,
+                        },
+                        pos: node.pos(),
+                    },
+                );
+                signatures.insert(name, (stack, false));
             }
             _ => panic!(
                 "Unknown node kind, expected func or inline. Error at {}",
@@ -666,6 +724,9 @@ fn parse_instructions<'a>(
                 );
                 idx
             }};
+            (perm) => {
+                parse_permutation(op!(), source)
+            };
         }
 
         macro_rules! inst {
@@ -708,6 +769,10 @@ fn parse_instructions<'a>(
                     None => Some(operand),
                 };
                 continue;
+            }
+            "perm" => {
+                let operand = op!(perm);
+                inst!(Instruction::Perm(operand); stack!(operand.input; -> operand.output.len() as u64))
             }
             "const" => inst!(Instruction::Const(op!(literal)); 0 -> 1),
             "call" => {
@@ -787,7 +852,7 @@ fn parse_instructions<'a>(
             },
             // Unknown *node kind*
             unknown => panic!(
-                "Invalid node type at {} (expected some kind of instruction)",
+                "Invalid node type `{}` (expected some kind of instruction)",
                 unknown
             ),
         };
@@ -969,22 +1034,41 @@ fn std_instructions<'a>(
 ) {
     // i spent WAY TOO FUCKING LONG on making this macro
     macro_rules! inst {
-        ($name:ident $in:literal -> $out:literal { $($i:tt)* } $(branch { $($b:tt)* })?) => {
-            {
-                let (is_branch, branch) = inst!(br $($($b)*)?);
-                let f = Function {
-                    name: stringify!($name),
-                    stack: stack!($in; -> $out),
-                    body: FunctionBody::Urcl {
-                        instructions: inst!(e $($i)*),
-                        branch,
-                    },
-                    pos: Position { row: 0, column: 0 },
-                };
-                sigs.insert(f.name, (f.stack, is_branch));
-                funcs.insert(f.name, f);
+        ($name:ident $in:literal -> $out:literal { $($i:tt)* } $(branch { $($b:tt)* })?) => {{
+            let (is_branch, branch) = inst!(br $($($b)*)?);
+            let f = Function {
+                name: stringify!($name),
+                stack: stack!($in; -> $out),
+                body: FunctionBody::Urcl {
+                    instructions: inst!(e $($i)*),
+                    branch,
+                },
+                pos: Position { row: 0, column: 0 },
+            };
+            sigs.insert(f.name, (f.stack, is_branch));
+            funcs.insert(f.name, f);
+        }};
+        ($name:ident [$($in:ident)*] -> [$($out:ident)*]) => {{
+            let mut names = HashMap::new();
+            for (i, name) in <[&str]>::iter(&[$(stringify!($in),)*]).enumerate() {
+                names.insert(name, i as u64);
             }
-        };
+            let p = Permutation {
+                input: names.len() as u64,
+                output: vec![$(names[&stringify!($out)],)*],
+            };
+            let f = Function {
+                name: stringify!($name),
+                stack: stack!(p.input; -> p.output.len() as u64),
+                body: FunctionBody::Urcl {
+                    instructions: compile_permutation(&p, Position { row: 0, column: 0 }),
+                    branch: None,
+                },
+                pos: Position { row: 0, column: 0 },
+            };
+            sigs.insert(f.name, (f.stack, false));
+            funcs.insert(f.name, f);
+        }};
         (i $inst:ident :dest $($s:tt)*) => {
             inst!(p { $inst (UrclDestination::Branch(UrclBranchDestination::BranchLabel)) } $($s)*)
         };
@@ -1034,11 +1118,11 @@ fn std_instructions<'a>(
         (br $($i:tt)+ ) => { (true, Some(inst!(e $($i)+))) };
     }
 
-    inst!(dup 1 -> 2 { MOV R(2) R(1) });
+    inst!(dup [a] -> [a a]);
     // pop is a compile-time operation that only modifies stack height, as anything in unused regs are just garbage
-    inst! { pop 1 -> 0 { } }
+    inst! { pop [a] -> [] }
     // nop doesn't need to map to NOP, since URCL is apparently supposed to support multiple labels per instruction [citation needed]
-    inst! { nop 0 -> 0 { } }
+    inst! { nop [] -> [] }
 
     inst! { load 1 -> 1 { LOD R(1) R(1) } }
     inst! { store 2 -> 0 { STR R(1) R(2) } }
@@ -1090,4 +1174,63 @@ fn std_instructions<'a>(
     inst! { gte 2 -> 1 { SETGE R(1) R(1) R(2) } branch { BGE :dest R(1) R(2) } }
     inst! { lt 2 -> 1 { SETL R(1) R(1) R(2) } branch { BRL :dest R(1) R(2) } }
     inst! { lte 2 -> 1 { SETLE R(1) R(1) R(2) } branch { BLE :dest R(1) R(2) } }
+}
+
+fn compile_permutation<'a>(perm: &Permutation, pos: Position) -> Vec<UrclInstructionEntry<'a>> {
+    let mut movs = Vec::new();
+    let mut changes = Vec::new();
+    // src is the value, dest is the index, so they are swapped here and only here
+    // because for everything else they're tuples of (src, dest)
+    for (dest, &src) in perm.output.iter().enumerate() {
+        let dest = dest as u64;
+        if src != dest {
+            changes.push((src, dest));
+        }
+    }
+    {
+        // Changes that are written to a register that no other changes will read from. They are safe to do immediately.
+        let mut dangling = Vec::new();
+        loop {
+            for &(src, dest) in changes.iter() {
+                if !changes.iter().any(|&(s, _)| s == dest) {
+                    dangling.push((src, dest));
+                }
+            }
+            if dangling.is_empty() {
+                break;
+            }
+            for tuple @ (src, dest) in dangling.drain(..) {
+                changes.swap_remove(changes.iter().position(|&t| t == tuple).unwrap());
+                movs.push((src, dest));
+            }
+        }
+    }
+    {
+        // Circular references are the only ones left, so a temporary register is needed
+        let temp = perm.output.len() as u64;
+        while let Some((src, dest)) = changes.pop() {
+            let mut circular = vec![temp, src];
+            let mut last_dest = dest;
+            while last_dest != src {
+                let i = changes.iter().position(|&(s, _)| s == last_dest).unwrap();
+                let (_, dest) = changes.swap_remove(i);
+                circular.push(last_dest);
+                last_dest = dest;
+            }
+            circular.push(temp);
+            for i in 1..circular.len() {
+                movs.push((circular[i], circular[i - 1]));
+            }
+        }
+    }
+    movs.into_iter()
+        .map(|(src, dest)| UrclInstructionEntry {
+            instruction: UrclInstruction::Unary {
+                op: "MOV",
+                dest: UrclDestination::Register(1 + dest as u64),
+                source: UrclSource::Register(1 + src as u64),
+            },
+            pos,
+        })
+        .collect()
 }

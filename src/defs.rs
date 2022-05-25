@@ -24,6 +24,7 @@ impl Display for StackBehaviour {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct Position {
     pub row: usize,
     pub column: usize,
@@ -49,6 +50,26 @@ pub struct Function<'a> {
     pub stack: StackBehaviour,
     pub body: FunctionBody<'a>,
     pub pos: Position,
+}
+
+#[derive(PartialEq, Eq)]
+pub struct Permutation {
+    pub input: u64,
+    pub output: Vec<u64>,
+}
+
+impl Display for Permutation {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "[ ")?;
+        for i in 0..self.input {
+            write!(f, "${} ", i + 1)?;
+        }
+        write!(f, "] -> [ ")?;
+        for i in &self.output {
+            write!(f, "${} ", i + 1)?;
+        }
+        write!(f, "]")
+    }
 }
 
 pub enum FunctionBody<'a> {
@@ -262,6 +283,7 @@ impl Display for Literal<'_> {
 }
 
 pub enum Instruction<'a> {
+    Perm(Permutation),
     Const(Literal<'a>),
 
     In(&'a str),
@@ -283,22 +305,23 @@ pub enum Instruction<'a> {
 impl Display for Instruction<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         match self {
-            Self::Const(op) => write!(f, "const {op}"),
+            Self::Perm(perm) => write!(f, "perm {perm}"),
+            Self::Const(lit) => write!(f, "const {lit}"),
 
-            Self::In(op) => write!(f, "in %{op}"),
-            Self::Out(op) => write!(f, "out %{op}"),
+            Self::In(port) => write!(f, "in %{port}"),
+            Self::Out(port) => write!(f, "out %{port}"),
 
-            Self::Jump(op) => write!(f, "jump :{op}"),
+            Self::Jump(dest) => write!(f, "jump :{dest}"),
             Self::Branch(condition, dest) => write!(f, "{condition} branch :{dest}"),
 
             Self::Halt => write!(f, "halt"),
 
-            Self::Call(op) => write!(f, "call {op}"),
+            Self::Call(func) => write!(f, "call {func}"),
             Self::IndirectCall(stack) => write!(f, "icall {stack}"),
             Self::Ret => write!(f, "ret"),
 
-            Self::Get(op) => write!(f, "get {op}"),
-            Self::Set(op) => write!(f, "set {op}"),
+            Self::Get(idx) => write!(f, "get {idx}"),
+            Self::Set(idx) => write!(f, "set {idx}"),
         }
     }
 }

@@ -5,8 +5,9 @@
 .vtable_or_something [ $func_fib ]
 
 func $main {
-    const $fib
     const 20
+    const $fib
+    perm [a b] -> [b a]
     icall 1 -> 1
     out %NUMB
 }

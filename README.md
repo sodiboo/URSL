@@ -202,6 +202,12 @@ urcl add 2 -> 1 {
 }
 ```
 
+# Custom permutations
+
+"Custom permutations" are custom instructions that are declared using a permutation only, instead of URCL code. This allows you to give name to commonly used permutations, like ``nop``, ``dup``, ``pop``, etc
+
+Their syntax is just ``inst name [a b c] -> [a b c]`` where ``[a b c]`` is just any number of identifiers that are delimited by square brackets, and ``name`` is the instruction name.
+
 # Instructions
 
 Most instructions will pop 2 operands off the top of the stack, and push 1 result. This usually translates to a single URCL instruction, which makes most code very efficient.
@@ -213,6 +219,10 @@ Here is a list of instructions, and what they do. Their name is written with an 
 ## ``height 0``
 
 After an instruction that always manages control flow (such as ``ret``, ``ret``, ``halt``) the stack height after it will be undefined. If instructions come after it, they must be jumped to, and since there is no stack height information already, ``height`` will specify the height that the code after should have. You can also use height directives to assert that the stack has a certain height at any given moment, and it may especially be useful in compiler outputs targeting URSL, because then the URSL compiler will refuse any code that does not match the expected height.
+
+## ``perm [a b c] -> [c b a]``
+
+This instruction names the top elements of the operand stack in the left grouping (rightmost item is the top element), and in the right grouping it uses the same names to define the order these elements will be pushed back to the stack. ``perm`` is short for permutate, or permutation, and the example given in the syntax above will rotate the top 3 elements, such that the previously-topmost element is the third from the top.
 
 ## ``const 0`` -> 1
 
