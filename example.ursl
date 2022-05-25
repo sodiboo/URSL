@@ -5,25 +5,23 @@
 .vtable_or_something [ $func_fib ]
 
 func $main {
-    const 20
     const $fib
+    const 20
     icall 1 -> 1
     out %NUMB
 }
 
 func $fib 1 -> 1 {
-    let n {
-        get n  const 0  eq branch :base_case
-        get n  const 1  eq branch :base_case
+    get 0  const 0  eq branch :base_case
+    get 0  const 1  eq branch :base_case
 
-          get n  const 1  sub call $fib
-          get n  const 2  sub call $fib
-         add
-        ret
+      get 0  const 1  sub call $fib
+      get 0  const 2  sub call $fib
+     add
+    ret
 
-        height 0
-        :base_case
-        get n
-        ret
-    }
+    height 0
+    :base_case
+    get 0
+    ret
 }

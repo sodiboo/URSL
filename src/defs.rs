@@ -76,6 +76,22 @@ pub struct UrclInstructionEntry<'a> {
     pub pos: Position,
 }
 
+pub trait PositionEntry {
+    fn pos(&self) -> &Position;
+}
+
+impl PositionEntry for InstructionEntry<'_> {
+    fn pos(&self) -> &Position {
+        &self.pos
+    }
+}
+
+impl PositionEntry for UrclInstructionEntry<'_> {
+    fn pos(&self) -> &Position {
+        &self.pos
+    }
+}
+
 #[derive(Clone)]
 pub enum UrclInstruction<'a> {
     In {
@@ -260,44 +276,29 @@ pub enum Instruction<'a> {
     IndirectCall(StackBehaviour),
     Ret,
 
-    Stack(u64),
-
-    Let(Vec<&'a str>, Vec<InstructionEntry<'a>>),
-    Get(&'a str),
-    Set(&'a str),
+    Get(u64),
+    Set(u64),
 }
 
 impl Display for Instruction<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         match self {
-            Self::Const(lit) => write!(f, "const {lit}"),
+            Self::Const(op) => write!(f, "const {op}"),
 
-            Self::In(port) => write!(f, "in %{port}"),
-            Self::Out(port) => write!(f, "out %{port}"),
+            Self::In(op) => write!(f, "in %{op}"),
+            Self::Out(op) => write!(f, "out %{op}"),
 
-            Self::Jump(dest) => write!(f, "jump :{dest}"),
+            Self::Jump(op) => write!(f, "jump :{op}"),
             Self::Branch(condition, dest) => write!(f, "{condition} branch :{dest}"),
 
             Self::Halt => write!(f, "halt"),
 
-            Self::Call(func) => write!(f, "call {func}"),
+            Self::Call(op) => write!(f, "call {op}"),
             Self::IndirectCall(stack) => write!(f, "icall {stack}"),
             Self::Ret => write!(f, "ret"),
 
-            Self::Stack(idx) => write!(f, "stack {idx}"),
-            Self::Let(names, insts) => {
-                write!(f, "let")?;
-                for name in names {
-                    write!(f, " {name}")?;
-                }
-                writeln!(f, " {{")?;
-                for entry in insts {
-                    writeln!(f, "{}", entry.instruction)?;
-                }
-                write!(f, "}}")
-            }
-            Self::Get(op) => write!(f, "get ${op}"),
-            Self::Set(op) => write!(f, "set ${op}"),
+            Self::Get(op) => write!(f, "get {op}"),
+            Self::Set(op) => write!(f, "set {op}"),
         }
     }
 }
