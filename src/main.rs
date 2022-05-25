@@ -37,7 +37,7 @@ struct Args {
     #[clap(long)]
     garbage_initialized_locals: bool,
 
-    /// Removes predefined instructions. With this parameter, only the following instructions are predefined: const, in, out, jump, branch, halt, call, ret, get, set
+    /// Removes predefined instructions. With this parameter, only the following instructions are predefined: const, in, out, jump, branch, halt, call, ret, stack, get, set
     #[clap(short, long)]
     minimal: bool,
 }
@@ -195,14 +195,9 @@ fn main() -> io::Result<()> {
 
     let functions = parse_functions(args, &mut cursor, &source);
 
-    let main_locals = if let Some(main) = functions.get("$main") {
-        assert_eq!(main.stack.input, 0, "$main may not take any arguments");
-        assert_eq!(main.stack.output, 0, "$main may not return any values");
-        if let FunctionBody::Ursl { locals, .. } = main.body {
-            locals
-        } else {
-            panic!("$main is a custom instruction. This should be unreachable.")
-        }
+    if let Some(Function { stack, .. }) = functions.get("$main") {
+        assert_eq!(stack.input, 0, "$main may not take any arguments");
+        assert_eq!(stack.output, 0, "$main may not return any values");
     } else {
         panic!("No $main function")
     };
@@ -210,9 +205,6 @@ fn main() -> io::Result<()> {
     let mut f = File::create(&args.output)?;
 
     writeln!(f, "PSH ~+2")?;
-    if main_locals != 0 {
-        writeln!(f, "SUB SP SP {main_locals}")?;
-    }
     writeln!(f, "JMP .{}", mangle_function_name("main"))?;
     writeln!(f, "HLT")?;
 
@@ -227,8 +219,8 @@ fn main() -> io::Result<()> {
         } = func.body
         {
             assert!(!instructions.is_empty()); // empty instruction lists are only allowed for -> 0, and parsing normalizes them to end with a ret
-            let name = &func.name[1..]; // trim $ prefix
-            writeln!(f, ".{}", mangle_function_name(name))?;
+            let func_name = &func.name[1..]; // trim $ prefix
+            writeln!(f, ".{}", mangle_function_name(func_name))?;
             if args.garbage_initialized_locals {
                 if func.stack.input != 0 {
                     writeln!(f, "SUB SP SP {locals}")?;
@@ -238,184 +230,222 @@ fn main() -> io::Result<()> {
                     writeln!(f, "PSH 0")?;
                 }
             }
-            let map_loc = |idx| {
-                // this is really just (idx - func.stack.input) % (func.stack.input + locals)
-                // but i think this is cleaner?
-                // this is required because, for function pointers to work, the function needs to allocate its own locals
-                // and with that, the locals are at the bottom, so that it doesn't have to move arguments to make space for locals
-                // but i didn't wanna change behaviour since i quite like `get 0` being arg 0
-                // however, the actual output still needs to bend around the new memory layout
-                // which is why this closure exists
-                if idx < func.stack.input {
-                    // idx is referring to an arg
-                    idx + locals
-                } else {
-                    // idx is referring to a local
-                    idx - func.stack.input
-                }
-            };
-            for entry in instructions {
-                if args.verbose {
-                    write!(f, "// +{}; {} -> ", entry.excess_height, entry.enter_height)?;
-                    match entry.exit_height {
-                        Some(n) => writeln!(f, "{n}")?,
-                        None => writeln!(f, "?")?,
-                    }
-                }
-                if let Some(label) = entry.label {
-                    writeln!(f, ".{}", mangle_local_label(name, label))?;
-                }
-                let excess_height = entry.excess_height;
-                let r1 = excess_height + 1;
-                let emit_inline = |f: &mut File,
-                                   instructions: &Vec<UrclInstructionEntry>,
-                                   branch_target|
-                 -> io::Result<()> {
-                    Ok(for entry in instructions {
-                        match &entry.instruction {
-                            UrclInstruction::In { dest, port } => writeln!(
-                                f,
-                                "IN ${} %{port}",
-                                match dest {
-                                    0 => 0,
-                                    n => excess_height + n,
-                                }
-                            )?,
-                            UrclInstruction::Out { port, source } => {
-                                writeln!(f, "OUT %{port} {}", source.emit(excess_height))?
-                            }
-                            UrclInstruction::Jmp { dest } => {
-                                writeln!(f, "JMP {}", dest.emit(branch_target))?
-                            }
-
-                            UrclInstruction::Unary { op, dest, source } => writeln!(
-                                f,
-                                "{op} {} {}",
-                                dest.emit(excess_height, branch_target),
-                                source.emit(excess_height)
-                            )?,
-                            UrclInstruction::Binary {
-                                op,
-                                dest,
-                                source1,
-                                source2,
-                            } => writeln!(
-                                f,
-                                "{op} {} {} {}",
-                                dest.emit(excess_height, branch_target),
-                                source1.emit(excess_height),
-                                source2.emit(excess_height)
-                            )?,
-                        }
-                    })
-                };
-                match entry.instruction {
-                    Instruction::Ret => {
-                        writeln!(f, "ADD SP SP {}", func.stack.input + locals)?;
-                        writeln!(f, "RET")?;
-                    }
-                    Instruction::Halt => writeln!(f, "HLT")?,
-                    Instruction::Const(ref lit) => writeln!(f, "IMM ${r1} {lit}")?,
-                    Instruction::Get(idx) => writeln!(f, "LLOD ${r1} SP {}", map_loc(idx))?,
-                    Instruction::Set(idx) => writeln!(f, "LSTR SP {} ${r1}", map_loc(idx))?,
-                    Instruction::In(port) => writeln!(f, "IN ${r1} %{port}")?,
-                    Instruction::Out(port) => writeln!(f, "OUT %{port} ${r1}")?,
-                    Instruction::Jump(label) => {
-                        writeln!(f, "JMP .{}", mangle_local_label(name, label))?
-                    }
-                    Instruction::Branch(prefix, label) => {
-                        if let Some(Function {
-                            body:
-                                FunctionBody::Urcl {
-                                    branch: Some(branch),
-                                    ..
-                                },
-                            ..
-                        }) = functions.get(prefix)
-                        {
-                            emit_inline(&mut f, branch, Some(&mangle_local_label(name, label)))?;
-                        } else {
-                            panic!("Already checked that func exists. This should be unreachable.")
-                        }
-                    }
-                    Instruction::Call(func) => {
-                        if let Some(func) = functions.get(func) {
-                            match func.body {
-                                FunctionBody::Urcl {
-                                    ref instructions, ..
-                                } => emit_inline(&mut f, instructions, None)?,
-                                FunctionBody::Ursl { .. } => {
-                                    if args.verbose {
-                                        writeln!(f, "// begin call {}", func.name)?;
-                                    }
-                                    for i in 1..=excess_height {
-                                        writeln!(f, "PSH ${i}")?;
-                                    }
-                                    writeln!(
-                                        f,
-                                        "PSH ~+{}", // return pointer
-                                        // 2 because of the jump, and we want the inst *after* that
-                                        2 + func.stack.input
-                                    )?;
-                                    for i in 1..=func.stack.input {
-                                        writeln!(f, "PSH ${}", excess_height + i)?;
-                                    }
-                                    writeln!(f, "JMP .{}", mangle_function_name(&func.name[1..]))?; // trim $ prefix
-
-                                    if args.verbose {
-                                        writeln!(f, "// return from {}", func.name)?;
-                                    }
-                                    if excess_height != 0 {
-                                        for i in 1..=func.stack.output {
-                                            writeln!(f, "MOV ${} ${i}", i + excess_height)?;
-                                        }
-                                        for i in (1..=excess_height).rev() {
-                                            writeln!(f, "POP ${i}")?;
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            panic!("Already checked that func exists. This should be unreachable.")
-                        }
-                    }
-                    Instruction::IndirectCall(stack) => {
-                        let func = excess_height + 1;
-                        if args.verbose {
-                            writeln!(f, "// begin icall {stack}")?;
-                        }
-                        for i in 1..=excess_height {
-                            writeln!(f, "PSH ${i}")?;
-                        }
-                        writeln!(
-                            f,
-                            "PSH ~+{}", // return pointer
-                            // 2 because of the jump, and we want the inst *after* that
-                            2 + stack.input
-                        )?;
-                        for i in 1..=stack.input {
-                            writeln!(f, "PSH ${}", func + i)?;
-                        }
-                        writeln!(f, "JMP ${func}")?;
-
-                        if args.verbose {
-                            writeln!(f, "// return from icall")?;
-                        }
-                        if excess_height != 0 {
-                            for i in 1..=stack.output {
-                                writeln!(f, "MOV ${} ${i}", i + excess_height)?;
-                            }
-                            for i in (1..=excess_height).rev() {
-                                writeln!(f, "POP ${i}")?;
-                            }
-                        }
-                    }
-                }
-            }
+            recursive_write_function(
+                args,
+                &mut f,
+                func_name,
+                func,
+                locals,
+                HashMap::new(),
+                0,
+                &functions,
+                instructions,
+            )?;
         }
     }
 
     Ok(())
+}
+
+fn recursive_write_function<'a>(
+    args: &Args,
+    f: &mut File,
+    func_name: &'a str,
+    func: &Function<'a>,
+    locals: u64,
+    bindings: HashMap<&'a str, u64>,
+    extra_height: u64,
+    functions: &BTreeMap<&'a str, Function<'a>>,
+    instructions: &Vec<InstructionEntry<'a>>,
+) -> io::Result<()> {
+    Ok(for entry in instructions {
+        if args.verbose {
+            write!(f, "// +{}; {} -> ", entry.excess_height, entry.enter_height)?;
+            match entry.exit_height {
+                Some(n) => writeln!(f, "{n}")?,
+                None => writeln!(f, "?")?,
+            }
+        }
+        if let Some(label) = entry.label {
+            writeln!(f, ".{}", mangle_local_label(func_name, label))?;
+        }
+        let excess_height = entry.excess_height + extra_height;
+        let r1 = excess_height + 1;
+        match entry.instruction {
+            Instruction::Ret => {
+                if extra_height != 0 {
+                    for i in 1..=func.stack.output {
+                        writeln!(f, "MOV ${i} ${}", extra_height + i)?;
+                    }
+                }
+                if locals != 0 {
+                    writeln!(f, "ADD SP SP {}", locals)?;
+                }
+                writeln!(f, "RET")?;
+            }
+            Instruction::Halt => writeln!(f, "HLT")?,
+            Instruction::Const(ref lit) => writeln!(f, "IMM ${r1} {lit}")?,
+            Instruction::Stack(idx) => writeln!(f, "ADD ${r1} SP {idx}")?,
+            Instruction::Get(name) => writeln!(f, "MOV ${r1} ${}", bindings[name])?,
+            Instruction::Set(name) => writeln!(f, "MOV ${} ${r1}", bindings[name])?,
+            Instruction::In(port) => writeln!(f, "IN ${r1} %{port}")?,
+            Instruction::Out(port) => writeln!(f, "OUT %{port} ${r1}")?,
+            Instruction::Jump(label) => {
+                writeln!(f, "JMP .{}", mangle_local_label(func_name, label))?
+            }
+            Instruction::Branch(prefix, label) => {
+                if let Some(Function {
+                    body:
+                        FunctionBody::Urcl {
+                            branch: Some(branch),
+                            ..
+                        },
+                    ..
+                }) = functions.get(prefix)
+                {
+                    emit_inline_inst(
+                        f,
+                        branch,
+                        Some(&mangle_local_label(func_name, label)),
+                        excess_height,
+                    )?;
+                } else {
+                    panic!("Already checked that func exists. This should be unreachable.")
+                }
+            }
+            Instruction::Call(func) => {
+                if let Some(func) = functions.get(func) {
+                    match func.body {
+                        FunctionBody::Urcl {
+                            ref instructions, ..
+                        } => emit_inline_inst(f, instructions, None, excess_height)?,
+                        FunctionBody::Ursl { .. } => {
+                            if args.verbose {
+                                writeln!(f, "// begin call {}", func.name)?;
+                            }
+                            for i in 1..=excess_height {
+                                writeln!(f, "PSH ${i}")?;
+                            }
+                            for i in 1..=func.stack.input {
+                                writeln!(f, "MOV ${i} ${}", excess_height + i)?;
+                            }
+                            writeln!(f, "PSH ~+2")?; // return pointer
+                            writeln!(f, "JMP .{}", mangle_function_name(&func.name[1..]))?; // trim $ prefix
+                            if args.verbose {
+                                writeln!(f, "// return from {}", func.name)?;
+                            }
+                            if excess_height != 0 {
+                                for i in 1..=func.stack.output {
+                                    writeln!(f, "MOV ${} ${i}", excess_height + i)?;
+                                }
+                                for i in (1..=excess_height).rev() {
+                                    writeln!(f, "POP ${i}")?;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    panic!("Already checked that func exists. This should be unreachable.")
+                }
+            }
+            Instruction::IndirectCall(stack) => {
+                if args.verbose {
+                    writeln!(f, "// begin icall {stack}")?;
+                }
+                if excess_height != 0 {
+                    for i in 1..=excess_height {
+                        writeln!(f, "PSH ${i}")?;
+                    }
+                    for i in 1..=stack.input {
+                        writeln!(f, "MOV ${i} ${}", excess_height + i)?;
+                    }
+                }
+                writeln!(f, "PSH ~+2")?; // return pointer
+                writeln!(f, "JMP ${}", excess_height + stack.input + 1)?;
+
+                if args.verbose {
+                    writeln!(f, "// return from icall")?;
+                }
+                if excess_height != 0 {
+                    for i in 1..=stack.output {
+                        writeln!(f, "MOV ${} ${i}", i + excess_height)?;
+                    }
+                    for i in (1..=excess_height).rev() {
+                        writeln!(f, "POP ${i}")?;
+                    }
+                }
+            }
+            Instruction::Let(ref new_bindings, ref insts) => {
+                let mut bindings = bindings.clone();
+                for i in 0..new_bindings.len() {
+                    bindings.insert(new_bindings[i], excess_height + i as u64 + 1);
+                }
+                let extra_height = excess_height + new_bindings.len() as u64;
+                recursive_write_function(
+                    args,
+                    f,
+                    func_name,
+                    func,
+                    locals,
+                    bindings,
+                    extra_height,
+                    &functions,
+                    insts,
+                )?;
+                for i in 0..new_bindings.len() {
+                    writeln!(
+                        f,
+                        "MOV ${} ${}",
+                        excess_height + i as u64,
+                        extra_height + i as u64
+                    )?;
+                }
+            }
+        }
+    })
+}
+
+fn emit_inline_inst<'a>(
+    f: &mut File,
+    instructions: &Vec<UrclInstructionEntry<'a>>,
+    branch_target: Option<&'a str>,
+    excess_height: u64,
+) -> io::Result<()> {
+    Ok(for entry in instructions {
+        match &entry.instruction {
+            UrclInstruction::In { dest, port } => writeln!(
+                f,
+                "IN ${} %{port}",
+                match dest {
+                    0 => 0,
+                    n => excess_height + n,
+                }
+            )?,
+            UrclInstruction::Out { port, source } => {
+                writeln!(f, "OUT %{port} {}", source.emit(excess_height))?
+            }
+            UrclInstruction::Jmp { dest } => writeln!(f, "JMP {}", dest.emit(branch_target))?,
+
+            UrclInstruction::Unary { op, dest, source } => writeln!(
+                f,
+                "{op} {} {}",
+                dest.emit(excess_height, branch_target),
+                source.emit(excess_height)
+            )?,
+            UrclInstruction::Binary {
+                op,
+                dest,
+                source1,
+                source2,
+            } => writeln!(
+                f,
+                "{op} {} {} {}",
+                dest.emit(excess_height, branch_target),
+                source1.emit(excess_height),
+                source2.emit(excess_height)
+            )?,
+        }
+    })
 }
 
 fn parse_stack_sig(node: Node, source: &str) -> StackBehaviour {
@@ -439,10 +469,9 @@ fn parse_locals(node: Node, source: &str) -> u64 {
     }
 }
 
-fn parse_label<'a, T: PositionEntry>(
+fn parse_label<'a>(
     inst: Node,
-    labels: &HashMap<&'a str, usize>,
-    instructions: &Vec<T>,
+    labels_pos: &HashMap<&'a str, Position>,
     func_name: &'a str,
     source: &'a str,
 ) -> Option<&'a str> {
@@ -450,12 +479,12 @@ fn parse_label<'a, T: PositionEntry>(
         Some(node) => {
             let label = Some(&node.text(source)[1..]); // trim :
             if let Some(label) = &label {
-                if let Some(idx) = labels.get(label) {
+                if let Some(pos) = labels_pos.get(label) {
                     panic!(
                         "Duplicate label {}:{} at {} and {}",
                         func_name,
                         label,
-                        instructions[*idx].pos(),
+                        pos,
                         node.pos()
                     );
                 }
@@ -561,14 +590,13 @@ fn parse_functions<'a>(
             } => {
                 let locals = *locals;
                 let node = nodes.get(func.name).unwrap();
-                parse_instructions(
+                *instructions = parse_instructions(
                     args,
                     &signatures,
-                    &node,
+                    node,
                     func.name,
-                    func.stack.input + locals,
-                    func.stack.output,
-                    instructions,
+                    func.stack,
+                    locals,
                     source,
                 );
                 if args.verbose {
@@ -617,15 +645,123 @@ fn parse_instructions<'a>(
     signatures: &HashMap<&str, (StackBehaviour, bool)>,
     node: &Node,
     func_name: &'a str,
+    stack: StackBehaviour,
+    locals: u64,
+    source: &'a str,
+) -> Vec<InstructionEntry<'a>> {
+    assert_eq!(node.kind(), "instruction_list");
+    let mut labels_pos = HashMap::<&'a str, Position>::new();
+    let mut labels = HashMap::<&'a str, Vec<u64>>::new();
+    let (mut instructions, height) = parse_instructions_raw(
+        args,
+        signatures,
+        node,
+        func_name,
+        stack.input,
+        locals,
+        stack.output,
+        &Vec::new(),
+        &Vec::new(),
+        &mut labels_pos,
+        &mut labels,
+        source,
+    );
+    verify_labels(0, func_name, &labels, &instructions, &instructions);
+    if stack.input == 0 {
+        if let Some(height) = height {
+            assert_eq!(
+                height, 0,
+                "Stack is not empty at the end of {func_name} (height is {height})",
+            );
+            instructions.push(InstructionEntry {
+                label: None,
+                excess_height: 0,
+                enter_height: 0,
+                exit_height: None,
+                instruction: Instruction::Ret,
+                pos: node.end_pos(),
+            });
+        }
+    } else {
+        assert!(
+            height.is_none(),
+            "func {} falls out of its scope without returning, jumping or halting.",
+            func_name,
+        );
+    }
+    instructions
+}
+
+fn verify_labels<'a>(
+    extra_height: u64,
+    func_name: &'a str,
+    labels: &HashMap<&'a str, Vec<u64>>,
+    top_instructions: &Vec<InstructionEntry<'a>>,
+    instructions: &Vec<InstructionEntry<'a>>,
+) {
+    for entry in instructions {
+        match entry.instruction {
+            Instruction::Branch(_, label) | Instruction::Jump(label) => {
+                if let Some(indices) = labels.get(label) {
+                    let height = find_label_height(0, indices.as_slice(), top_instructions);
+                    assert_eq!(
+                        entry.excess_height, height,
+                        "Incorrect stack height on branch (got {} but destination has {height})",
+                        entry.excess_height,
+                    );
+                } else {
+                    panic!("Branch or jump to unknown label {}:{}", func_name, label)
+                }
+            }
+            Instruction::Let(_, ref insts) => {
+                verify_labels(
+                    extra_height + entry.excess_height,
+                    func_name,
+                    labels,
+                    top_instructions,
+                    insts,
+                );
+            }
+            _ => (),
+        }
+    }
+}
+
+fn find_label_height<'a>(
+    extra_height: u64,
+    indices: &[u64],
+    instructions: &Vec<InstructionEntry<'a>>,
+) -> u64 {
+    assert!(!indices.is_empty());
+    let entry = &instructions[indices[0] as usize];
+    let indices = &indices[1..];
+    if indices.is_empty() {
+        extra_height + entry.enter_height
+    } else if let Instruction::Let(_, ref insts) = entry.instruction {
+        find_label_height(extra_height + entry.excess_height, indices, insts)
+    } else {
+        panic!("Non-empty label indices at non-compound instruction. This should be unreachable");
+    }
+}
+
+fn parse_instructions_raw<'a>(
+    args: &Args,
+    signatures: &HashMap<&str, (StackBehaviour, bool)>,
+    node: &Node,
+    func_name: &'a str,
+    start_height: u64,
     locals: u64,
     returns: u64,
-    instructions: &mut Vec<InstructionEntry<'a>>,
+    indices: &Vec<u64>,
+    bindings: &Vec<&'a str>,
+    labels_pos: &mut HashMap<&'a str, Position>,
+    labels: &mut HashMap<&'a str, Vec<u64>>,
     source: &'a str,
-) {
+) -> (Vec<InstructionEntry<'a>>, Option<u64>) {
     assert_eq!(node.kind(), "instruction_list");
-    let mut height = Some(0);
     let mut cursor = node.walk();
-    let mut labels = HashMap::<&'a str, usize>::new();
+    let mut height = Some(start_height);
+    let mut instructions = Vec::<InstructionEntry<'a>>::new();
     cursor.down();
     // skips {
     while cursor.next() {
@@ -633,7 +769,14 @@ fn parse_instructions<'a>(
         if inst.kind() == "}" {
             break;
         }
-        let label = parse_label(inst, &labels, &instructions, func_name, source);
+        let label = parse_label(inst, &labels_pos, func_name, source);
+
+        if let Some(label) = label {
+            let mut indices = indices.clone();
+            indices.push(instructions.len() as u64);
+            labels_pos.insert(label, inst.pos());
+            labels.insert(label, indices);
+        }
 
         macro_rules! op {
             () => {
@@ -666,12 +809,32 @@ fn parse_instructions<'a>(
                 );
                 idx
             }};
+            (var) => {{
+                let var = op!().text(source);
+                assert!(
+                    bindings.contains(&var),
+                    "Reference to unknown binding {var} at {}",
+                    inst.pos()
+                );
+                var
+            }};
+        }
+
+        macro_rules! height {
+            (check) => {
+                height.unwrap_or_else(|| panic!("Unknown stack height at {}", inst.pos()))
+            };
+            ($height:ident - $e:expr) => {
+                $height
+                    .checked_sub($e)
+                    .unwrap_or_else(|| panic!("Stack underflow at {}", inst.pos()))
+            };
         }
 
         macro_rules! inst {
             ($height:ident => $e:expr) => {
                 {
-                    let $height = height.unwrap_or_else(|| panic!("Unknown stack height at {}", inst.pos()));
+                    let $height = height!(check);
                     $e
                 }
             };
@@ -679,7 +842,7 @@ fn parse_instructions<'a>(
             ($inst:expr; $in:literal -> $out:literal) => { inst!($inst; stack!($in; -> $out)) };
             ($inst:expr; $stack:expr) => {
                 inst!(enter_height => {
-                    let excess_height = enter_height.checked_sub($stack.input).unwrap_or_else(|| panic!("Stack underflow at {}", inst.pos()));
+                    let excess_height = height!(enter_height - $stack.input);
                     InstructionEntry {
                         label,
                         excess_height,
@@ -721,8 +884,44 @@ fn parse_instructions<'a>(
                 let stack = op!(stack);
                 inst!(Instruction::IndirectCall(stack); stack!(stack.input + 1; -> stack.output))
             }
-            "get" => inst!(Instruction::Get(op!(loc)); 0 -> 1),
-            "set" => inst!(Instruction::Set(op!(loc)); 1 -> 0),
+            "stack" => inst!(Instruction::Stack(op!(loc)); 0 -> 1),
+            "let" => {
+                let enter_height = height!(check);
+                let names: Vec<&'a str> = inst
+                    .children_by_field_name("names", &mut cursor)
+                    .map(|node| node.text(source))
+                    .collect();
+                cursor.reset(inst);
+                let excess_height = height!(enter_height - names.len() as u64);
+                let mut indices = indices.clone();
+                indices.push(instructions.len() as u64);
+                let mut bindings = bindings.clone();
+                bindings.extend(names.iter());
+                let (insts, exit) = parse_instructions_raw(
+                    args,
+                    signatures,
+                    &inst.field("instructions"),
+                    func_name,
+                    0,
+                    locals,
+                    returns,
+                    &indices,
+                    &bindings,
+                    labels_pos,
+                    labels,
+                    source,
+                );
+                InstructionEntry {
+                    label,
+                    excess_height,
+                    enter_height,
+                    exit_height: exit.map(|h| excess_height + h),
+                    instruction: Instruction::Let(names, insts),
+                    pos: inst.pos(),
+                }
+            }
+            "get" => inst!(Instruction::Get(op!(var)); 0 -> 1),
+            "set" => inst!(Instruction::Set(op!(var)); 1 -> 0),
 
             "in" => inst!(Instruction::In(op!(port)); 0 -> 1),
             "out" => inst!(Instruction::Out(op!(port)); 1 -> 0),
@@ -791,46 +990,10 @@ fn parse_instructions<'a>(
                 unknown
             ),
         };
-        if let Some(label) = label {
-            labels.insert(label, instructions.len());
-        }
         height = entry.exit_height;
         instructions.push(entry);
     }
-    for entry in instructions.iter() {
-        if let Instruction::Jump(label) | Instruction::Branch(_, label) = entry.instruction {
-            let dest = &instructions[*labels.get(label).unwrap_or_else(|| {
-                panic!("Branch or jump to unknown label {}:{}", func_name, label)
-            })];
-            assert_eq!(
-                entry.excess_height, dest.enter_height,
-                "Incorrect stack height on branch (got {} but destination has {})",
-                entry.excess_height, dest.enter_height,
-            );
-        }
-    }
-    if returns == 0 {
-        if let Some(height) = height {
-            assert_eq!(
-                height, 0,
-                "Stack is not empty at the end of {func_name} (height is {height})",
-            );
-            instructions.push(InstructionEntry {
-                label: None,
-                excess_height: 0,
-                enter_height: 0,
-                exit_height: None,
-                instruction: Instruction::Ret,
-                pos: node.end_pos(),
-            });
-        }
-    } else {
-        assert!(
-            height.is_none(),
-            "func {} falls out of its scope without returning, jumping or halting.",
-            func_name,
-        );
-    }
+    (instructions, height)
 }
 
 fn parse_urcl_instructions<'a>(
@@ -844,6 +1007,7 @@ fn parse_urcl_instructions<'a>(
     let mut dummy_cursor = node.walk();
 
     let mut instructions = Vec::<UrclInstructionEntry>::new();
+    let mut labels_pos = HashMap::<&'a str, Position>::new();
     let mut labels = HashMap::<&'a str, usize>::new();
 
     let reg = |node: Node| node.field("idx").text(source).parse::<u64>().unwrap();
@@ -855,13 +1019,14 @@ fn parse_urcl_instructions<'a>(
             break;
         }
 
-        if let Some(label) = parse_label(inst, &labels, &instructions, func_name, source) {
+        if let Some(label) = parse_label(inst, &labels_pos, func_name, source) {
             if let Some(branch_destination) = branch_destination {
                 if label == branch_destination {
                     panic!("Duplicate label :{label} previously defined in branch destination, and also at {}", inst.pos());
                 }
             }
             labels.insert(label, instructions.len());
+            labels_pos.insert(label, inst.pos());
         }
 
         let entry = UrclInstructionEntry {

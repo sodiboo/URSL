@@ -7,40 +7,74 @@ HLT
 .data_nums [ 1 2 3 4 @MAX ]
 .data_vtable_or_something [ .func_func_fib ]
 .func_fib
-LLOD $1 SP 0
-IMM $2 0
-BRE .label_3_9_fib_base_case $1 $2
-LLOD $1 SP 0
-IMM $2 1
-BRE .label_3_9_fib_base_case $1 $2
-LLOD $1 SP 0
-IMM $2 1
-SUB $1 $1 $2
-PSH ~+3
-PSH $1
-JMP .func_fib
-LLOD $2 SP 0
-IMM $3 2
+// +0; 1 -> ?
+// +0; 0 -> 1
+MOV $2 $1
+// +1; 1 -> 2
+IMM $3 0
+// +0; 2 -> 0
+BRE .label_3_9_fib_base_case $2 $3
+// +0; 0 -> 1
+MOV $2 $1
+// +1; 1 -> 2
+IMM $3 1
+// +0; 2 -> 0
+BRE .label_3_9_fib_base_case $2 $3
+// +0; 0 -> 1
+MOV $2 $1
+// +1; 1 -> 2
+IMM $3 1
+// +0; 2 -> 1
 SUB $2 $2 $3
+// +0; 1 -> 1
+// begin call $fib
 PSH $1
-PSH ~+3
-PSH $2
+MOV $1 $2
+PSH ~+2
 JMP .func_fib
+// return from $fib
 MOV $2 $1
 POP $1
-ADD $1 $1 $2
-ADD SP SP 1
-RET
-.label_3_9_fib_base_case
-LLOD $1 SP 0
-ADD SP SP 1
-RET
-.func_main
-IMM $1 .func_fib
-IMM $2 20
-PSH ~+3
+// +1; 1 -> 2
+MOV $3 $1
+// +2; 2 -> 3
+IMM $4 2
+// +1; 3 -> 2
+SUB $3 $3 $4
+// +1; 2 -> 2
+// begin call $fib
+PSH $1
 PSH $2
-JMP $1
+MOV $1 $3
+PSH ~+2
+JMP .func_fib
+// return from $fib
+MOV $3 $1
+POP $2
+POP $1
+// +0; 2 -> 1
+ADD $2 $2 $3
+// +0; 1 -> ?
+MOV $1 $2
+RET
+// +0; 0 -> 1
+.label_3_9_fib_base_case
+MOV $2 $1
+// +0; 1 -> ?
+MOV $1 $2
+RET
+MOV $0 $1
+.func_main
+// +0; 0 -> 1
+IMM $1 20
+// +1; 1 -> 2
+IMM $2 .func_fib
+// +0; 2 -> 1
+// begin icall 1 -> 1
+PSH ~+2
+JMP $2
+// return from icall
+// +0; 1 -> 0
 OUT %NUMB $1
-ADD SP SP 0
+// +0; 0 -> ?
 RET

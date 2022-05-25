@@ -65,29 +65,26 @@ If the stack was not empty such as with a height of 1, then all the registers wi
 
 Because of how functions work in regards to stack manipulation, they are implemented specially in URSL, and are not just label jumps with a return pointer.
 
+Functions are declared using a syntax like ``func $name args -> returns + stacklocals``, where ``args``, ``returns``, ``stacklocals`` are all numeric literals. The stack behaviour of calling a function is determined by the ``args -> returns`` part. The ``+ stacklocals`` part is optional, defaulting to zero. The stack behaviour part is also optional, defaulting to zero also. That's nice especially for the ``$main`` function, which minimally is declared only as ``func $main { ret }``. The ``$main`` function must take zero arguments and return zero values. It can have locals, and it is the entrypoint of a URSL program. Additionally, if a function returns zero values, it can "fall out" of its block with an empty stack. (i.e. the ``ret`` at the end is optional for zero-returning functions)
 
-Functions are declared using a syntax like ``func $name args -> returns + locals``, where ``args``, ``returns``, ``locals`` are all numeric literals. The stack behaviour of calling a function is determined by the ``args -> returns`` part. The ``+ locals`` part is optional, defaulting to zero. The stack behaviour part is also optional, defaulting to zero also. That's nice especially for the ``$main`` function, which minimally is declared only as ``func $main { ret }``. The ``$main`` function must take zero arguments and return zero values. It can have locals, and it is the entrypoint of a URSL program. Additionally, if a function returns zero values, it can "fall out" of its block with an empty stack. (i.e. the ``ret`` at the end is optional for zero-returning functions)
+Inside a function, the operand stack starts with the values of the arguments, and ``ret`` must have stack height equal to the return count. This makes ``ret`` pretty much translate directly to a URCL ``RET`` instruction when no stack locals need to be deallocated, with all the heavy lifting being done at the callsite. For most local variables, i recommend you use [``let`` bindings](#let-bindings) to keep them in the registers, but if you need the **address** of a variable to pass it indirectly, you should use stack locals. That will allocate space on the callstack for additional locals, and you can use the ``stack`` instruction to load their address.
 
-Inside a function, the operand stack starts at height 0, and ``ret`` must have stack height equal to the return count. This makes ``ret`` pretty much translate directly to a URCL ``RET`` instruction when no locals need to be deallocated, with all the heavy lifting being done at the callsite.
-
-When calling a function like ``call $example``, its input arguments is however many off the top of the caller's stack it should receive. Take, for example, ``$example 2 -> 5 + 3`` (has 2 arguments, and 3 locals, and returns 5 values), and the caller has 4 items on their stack. It should translate into this URCL code:
+When calling a function like ``call $example``, its input arguments is however many off the top of the caller's stack it should receive. Take, for example, ``$example 2 -> 3`` (has 2 arguments, and returns 3 values), and the caller has 4 items on their stack. It should translate into this URCL code:
 
 ```arm
 // unload extra op stack entries to callstack
 PSH R1
 PSH R2
-// return pointer
-PSH ~+4
-// arguments are passed in reverse because SP points to arg 0, locals are allocated within the function which allows function pointers without needing the locals to be part of the signature
+// arguments are passed as the bottom registers
 // 2 arguments being passed
-PSH R4
-PSH R3
+MOV R1 R3
+MOV R2 R4
+// return pointer
+PSH ~+2
 JMP .example // the label may be mangled
 // return from function: stack height is 5 but we need to get the extra 2 as well.
 // the return pointer was popped, so only our two extra operands are on the stack
 // we need to shift everything up 2 regs
-MOV R7 R5
-MOV R6 R4
 MOV R5 R3
 MOV R4 R2
 MOV R3 R1
@@ -97,21 +94,23 @@ POP R1
 // continue with the next instructions
 ```
 
+For function pointers to work
+
 # Function pointers
 
 You can use function pointers in URSL. Functions are "constant values", much like data labels, and can appear in the data section or inside a ``const`` instruction. This will load the value of its mangled label onto the stack, and erases the signature. You then *must* remember its signature externally, and you can call it with ``icall``. The ``icall`` instruction takes a function signature as an immediate argument, and it behaves exactly as ``call``, except it takes one more stack operand than the arguments. The arguments are at the top of the stack, and just below all of the arguments is the pointer to the function to call. Take for example, the stack height is 5, and you do ``icall 2 -> 3``. That will consume the top *3* stack operands, output 3 more and translate to the following URCL code:
 
 ```
-// unload extra op stack entries to callstack. Notice that there are only two extras here, not (5 - 2) = 3, because R3 is the function pointer
+// unload extra op stack entries to callstack. Notice that there are only two extras here, not (5 - 2) = 3, because top is the function pointer
 PSH R1
 PSH R2
-// return pointer
-PSH ~+4
 // 2 arguments being passed
-PSH R5
-PSH R4
+MOV R1 R3
+MOV R2 R4
+// return pointer
+PSH ~+2
 // call the function
-JMP R3
+JMP R5 // The function pointer does not need to be shifted down
 // return from function: stack height is 5 but we need to get the extra 2 as well.
 // the return pointer was popped, so only our two extra operands are on the stack
 // we need to shift everything up 2 regs
@@ -134,16 +133,16 @@ call $example
 The equivalent indirect call is **NOT** this:
 
 ```diff
-// arguments
 - const $example
+// arguments
 icall 0 -> 0
 ```
 
 It is this:
 
 ```diff
-+ const $example
 // arguments
++ const $example
 icall 0 -> 0
 ```
 
@@ -152,6 +151,80 @@ icall 0 -> 0
 In URSL, instruction labels are marked with ``:`` prefix, and data labels with a ``.`` prefix. This allows easier differentiation, as the two kinds of labels are used quite differently, and in URSL they are not even interchangable.
 
 The stack height is enforced across jumps. Jumps to a label must either have the correct stack height from the instruction immediately preceding the label, or the label must be preceded by a ``height`` directive, which is always preceded by an unconditional control flow instruction (that is, ``ret``, ``halt``, ``jump``, which never execute the instruction after). The ``height`` directive informs the compiler of the expected stack height in the next instruction, in cases where the compiler does not know.
+
+# Let bindings
+
+A ``let`` binding will bind the values at the top of the stack to the names given. There must be at least one name. The ``let`` binding also includes a scope of instructions, after which the values that were bound are popped. ``let`` bindings are a performant way to have local variables without using the stack.
+
+The instructions inside a ``let`` binding's scope are verified as if it starts with 0 *effective* height, for underflow purposes, but the given names can be used in the ``get``/``set`` instructions to get and set its value. Jumps can go across ``let`` scopes, in which case their *actual* heights must match. This can involve completely different bound names. ``height`` directives inside ``let`` bindings are verified using the *effective* height.
+
+The order of ``let`` bindings' names are written from the bottom of the stack, with the last name being the top entry.
+
+Here is an example, to clear up some things above:
+
+```
+// fill stack with some excess items
+const 0
+const 0
+const 0
+let a b {
+    // pop // this would be an error: stack underflow
+    get a
+    get b
+    add
+
+    height 1 // effective height of 1
+    const 0
+    eq
+    branch :outside // valid! *actual* height is 3 + 1 = 4 (and branch consumes 1)
+
+    height 0 // effective height of 0
+    // add 2 more for an actual height of 5
+    const 0
+    const 0
+} // adds 1 extra
+pop pop
+halt
+
+height 0 // height 0, add 3 things
+const 0
+const 0
+const 0
+// here, stack is 3 unnamed items, but due to branch above, might be named bindings that now live longer than its scope
+:outside
+halt
+```
+
+Which should translate to this URCL:
+
+```arm
+IMM $1 0
+IMM $2 0
+IMM $3 0
+// let start: a = $2, b = $3
+MOV $4 $2
+MOV $5 $3
+ADD $4 $4 $5
+IMM $5 0
+// consumes 4 and 5, leaving 3 regs
+BRE .outside $4 $5
+// this is the end of the let binding: a and b are removed now, and everything above is *shifted down*
+MOV $2 $4
+MOV $3 $5
+// pops that consume $2 and $3
+NOP
+NOP
+HLT
+// height 0
+IMM $1 0
+IMM $2 0
+IMM $3 0
+// here you can clearly see, only 3 regs are used, so despite the effective height of the branch being 1, this is completely legal
+.outside
+HLT
+```
+
+``ret`` consumes the effective height in the given ``let`` scope. That is, the bindings that contribute to the height when jumping do *not* contribute to the height when returning. This is done for consistency, so that ``ret`` and the end of a ``let`` scope is the same as putting it after the scope.
 
 # Custom instructions
 
@@ -222,16 +295,24 @@ This pushes a constant value (numeric/char literal like ``0``/``'\n'``, a macro 
 IMM $1 operand
 ```
 
-## ``get 0`` -> 1
+## ``stack 0`` -> 1
 
-This will read the argument or local at the zero-indexed position given by the immediate operand. The immediate operand must be less than the sum of arguments and locals in scope.
+This will push the address of the given callstack local index to the operand stack. This is bounds checked against the locals for the given function. This value technically can live past its deallocation, and dereferencing it after that will lead to no good things, so i don't recommend doing so.
 
-```arm
-LLOD $1 SP operand
+```
+ADD $1 SP operand
 ```
 
-## ``set 0`` 1 -> 0
-This will write to the argument or local at the zero-indexed position given by the immediate operand. The immediate operand must be less than the sum of arguments and locals in scope. You can also overwrite arguments, because the caller does not reuse those. If the target is core URCL instructions, this should use the first translation for ``LSTR`` with ``$2`` as the temporary register.
+## ``get name`` -> 1
+
+This will push the variable bound by a [``let`` binding](#let-bindings) to the top of the stack.
+
+```arm
+MOV $1 {depends}
+```
+
+## ``set name`` 1 -> 0
+This will write the top item on the stack to the variable bound by a [```let binding``](#let-bindings)
 
 ```arm
 LSTR SP operand $1 
@@ -239,7 +320,7 @@ LSTR SP operand $1
 
 ## ``call $name``
 
-The stack behaviour of this instruction is that of the function being called. This is the most complex translation of all of URSL. The translation written here is python-ish pseudocode, because it isn't a simple substitution.
+The stack behaviour of this instruction is that of the function being called. This is one of the most complex translations of all of URSL. The translation written here is python-ish pseudocode, because it isn't a simple substitution.
 
 ```py
 # inclusive lower bound, exclusive upper bound (0..x means 0 <= i < x)
@@ -248,12 +329,11 @@ keep = height - target.args
 for i in 0..keep {
     PSH R{i + 1}
 }
-# directly after JMP
-PSH ~+{target.args + 1}
-# remember, first arg is pushed last (so it pops first)
-for i in reverse(keep..height) {
-    PSH R{i + 1}
+# remember, first arg is pushed last
+for i in keep..height {
+    MOV R{i - keep + 1} R{i + 1}
 }
+PSH ~+2
 # this label will be mangled slightly in the output
 JMP .{target}
 # this is omitted if keep = 0
@@ -265,9 +345,9 @@ for i in reverse(0..keep) {
 }
 ```
 
-## ``icall args -> returns``
+## ``icall args -> returns`` args + 1 -> returns
 
-Calls a function from a function pointer on the stack, with the given signature. This allows for dynamic dispatch, like for virtual functions. The translation is pretty much the same as ```call`` except ``.target`` is the register at the top of ``keep``, so one less register will be kept
+Calls a function from a [function pointer](#function-pointers) on the stack, with the given signature. This allows for dynamic dispatch, like for virtual functions. The translation is pretty much the same as ```call`` if you pop one value first, and replace ``.target`` with that value.
 
 ## ``ret``
 
