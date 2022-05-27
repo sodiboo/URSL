@@ -1,8 +1,14 @@
+bits 8
+minstack 200
+minheap 0
+
 .str [ 'H' 'e' 'l' 'l' 'o' ',' 0x20 'W' 'o' 'r' 'l' 'd' ]
 .escape '\n'
 .num 0x20
 .nums [ 1 2 3 4 /* ... */ @MAX ]
 .vtable_or_something [ $func_fib ]
+
+inst swap [a b] -> [b a]
 
 func $main {
     const 20
@@ -13,16 +19,16 @@ func $main {
 }
 
 func $fib 1 -> 1 {
-    get 0  const 0  eq branch :base_case
-    get 0  const 1  eq branch :base_case
+    get 0
+    dup  const 0  eq branch :base_case
+    dup  const 1  eq branch :base_case
 
-      get 0  const 1  sub call $fib
-      get 0  const 2  sub call $fib
+      dup  const 1  sub call $fib
+      swap  const 2  sub call $fib
      add
     ret
 
-    height 0
+    height 1
     :base_case
-    get 0
     ret
 }

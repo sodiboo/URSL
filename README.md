@@ -20,11 +20,20 @@ Instructions that have signed/unsigned variants generally give the name to the s
 
 The stack pointer (SP) and program counter (PC) are entirely opaque to URSL code. Memory is not abstracted in any way for URSL, and it is possible to overwrite the callstack, which will cause issues, obviously. Numeric literals in URSL are always unsigned, because i don't wanna deal with signed number literals in the output. The compiler internally keeps track of everything as ``u64``, which is why you cannot use URSL with ``BITS >= 65`` unless you would like to modify the compiler itself to use some kind of bigint. If you want to use negative numbers, you should load them like ``const 0``; ``neg``
 
+# Headers
+
+All headers must be specified at the beginning of a program and have no defaults. They are the same as in URCL.
+
+- ``bits 0`` corresponds to URCL's ``BITS 0``
+- ``minheap 0`` corresponds to URCL's ``MINHEAP 0``
+- ``minstack 0`` corresponds to URCL's ``MINSTACK 0``
+- There is no equivalent to ``MINREG``
+
 # Predefined data
 
 At the start of the file, there can be predefined data to keep in RAM. All data definitions must be labeled with a data label (``.name``), which is followed by a literal which is just the same as the ``DW`` operand in URCL (char, number, or array of either), and compiles directly to that instruction. Newlines are technically not signficant in URSL, at least not any more than other whitespace (carefully done to create a simpler grammar) which means that you're free to format arrays however you think makes sense. All definitions are outputted as ``DW``s in the same order, but i really don't recommend you try to do any arithmetic on the pointers to them, and there is no guarantee of what happens if you do so. An exception to this is obviously arrays, whose behaviour is well defined until the end of the array.
 
-``RUN RAM``/``ROM`` is not distinguished in URSL. Depending on the behaviour of the target ISA, either one of these may be fit. URSL expects ``DW``s to be writable, but it will never try to read or write from an instruction label, or jump to any value that isn't an immediate label. URSL respects that instructions may be stored in addressable memory, and does not require ``#0`` to be a specific value it can figure out just by the data definitions. Any pointers that are outside the heap (less than ``#0``) are undefined behaviour in URSL, except for data labels.
+``RUN RAM``/``ROM`` is not distinguished in URSL. Depending on the behaviour of the target ISA, either one of these may be fit. URSL expects ``DW``s to be writable (i.e. it always allows writing to a data label, but obviously that won't happen unless your code actually writes to a data label), but URSL output will never try to read or write from an instruction label, or jump to any value that isn't an immediate label. URSL respects that instructions may be stored in addressable memory, and does not require ``#0`` to be a specific value it can figure out just by the data definitions. Any pointers that are outside the heap (less than ``#0``) are undefined behaviour in URSL, unless they're made from data labels, or from the ``ref`` instruction (given that stack frame still exists)
 
 # Core concepts
 
@@ -206,25 +215,31 @@ urcl add 2 -> 1 {
 
 "Custom permutations" are custom instructions that are declared using a permutation only, instead of URCL code. This allows you to give name to commonly used permutations, like ``nop``, ``dup``, ``pop``, etc
 
-Their syntax is just ``inst name [a b c] -> [a b c]`` where ``[a b c]`` is just any number of identifiers that are delimited by square brackets, and ``name`` is the instruction name.
+Their syntax is just ``inst name [a b c] -> [a b c]`` where ``[a b c]`` is just any number of identifiers that are delimited by square brackets, and ``name`` is the instruction name. See [perm](#perm-a-b-c---c-b-a)
 
 # Instructions
 
 Most instructions will pop 2 operands off the top of the stack, and push 1 result. This usually translates to a single URCL instruction, which makes most code very efficient.
 
-Some instructions will also take an immediate operand, which is written directly after the instruction. Usually, this affects the resulting URCL more than a simple substitution. These are the most important instructions in URSL, even if some of them aren't that exciting, like the jumps.
+Some instructions will also take an immediate operand, which is written directly after the instruction. Usually, this affects the resulting URCL more than a simple substitution. These are the most important instructions in URSL, even if some of them aren't that exciting, like halting.
 
-Here is a list of instructions, and what they do. Their name is written with an example of an operand of that type. Some may have an explanation in parenthesis as a C-like expression where operands are represented as letters from the start of the alphabet. Signed/unsignedness of instructions are only stated in the descriptions, and not in the title explanation. There are also translations for most of these, where registers that depend on stack height are specified with the ``S`` prefix, written as if the stack height was exactly the amount of input operands. (if that is actually true, the ``S`` registers translate directly to actual registers without any arithmetic) An immediate operand is just ``operand`` in the translations. Their stack behaviour is also written in the ``args -> returns`` syntax that functions use (``args`` is omitted when zero)
+Here is a list of instructions, and what they do. Their name is written with an example of an operand of that type. Some may have an explanation in parenthesis as a C-like expression where operands are represented as letters from the start of the alphabet. Signed/unsignedness of instructions are only stated in the descriptions, and not in the title explanation. There are also translations for most of these, where registers are written as if the stack height was exactly the amount of input operands (``$0`` is zero reg, anything else is offset from the excess height). An immediate operand is just ``operand`` in the translations. Their stack behaviour is also written in the ``args -> returns`` syntax that functions use
 
 ## ``height 0``
 
 After an instruction that always manages control flow (such as ``ret``, ``ret``, ``halt``) the stack height after it will be undefined. If instructions come after it, they must be jumped to, and since there is no stack height information already, ``height`` will specify the height that the code after should have. You can also use height directives to assert that the stack has a certain height at any given moment, and it may especially be useful in compiler outputs targeting URSL, because then the URSL compiler will refuse any code that does not match the expected height.
 
-## ``perm [a b c] -> [c b a]``
+## ``perm [a b c] -> [c a b]``
 
 This instruction names the top elements of the operand stack in the left grouping (rightmost item is the top element), and in the right grouping it uses the same names to define the order these elements will be pushed back to the stack. ``perm`` is short for permutate, or permutation, and the example given in the syntax above will rotate the top 3 elements, such that the previously-topmost element is the third from the top.
 
-## ``const 0`` -> 1
+By convention, the left side is usually named alphabetically, but they can be any identifier.
+
+``perm`` purely moves items on the stack, and does not perform any computation. It only translates to URCL ``MOV`` instructions, and it only emits ``MOV`` instructions for every position that is modified. Modified here means that the same position in both stack frames correspond to two distinct items, i.e. the right side is *not empty*. For any items that are the same or absent in the right hand side, that is a nop and is translates to nothing.
+
+The algorithm for this takes the parameters in a completely different form than the syntax, so it is not as easy to describe as the calling convention. It also doesn't really matter, since it's mostly an implementation detail, but if you wanna see it, it's in [permutation.rs](src/permutation.rs)
+
+## ``const 0`` 0 -> 1
 
 This pushes a constant value (numeric/char literal like ``0``/``'\n'``, a macro value like ``@MAX``, a heap address like ``#0``, a data label like ``.label``, or a function pointer like ``$func``) onto the stack. In the future, i might add optimizations that ``const`` stack values are always translated to immediate values. This is the only instruction that accepts multiple operand types. And it's overloaded with a *lot* of types that you may wanna load.
 
@@ -232,7 +247,15 @@ This pushes a constant value (numeric/char literal like ``0``/``'\n'``, a macro 
 IMM $1 operand
 ```
 
-## ``get 0`` -> 1
+## ``ref 0`` 0 -> 1
+
+This will load the address of the given argument or local at the zero-indexed position given by the immediate operand. You can read/write to it with ``load``/``store``. Once the current function returns, this pointer will be garbage, and it's undefined behaviour to use it afterwards.
+
+```arm
+ADD $1 SP operand
+```
+
+## ``get 0`` 0 -> 1
 
 This will read the argument or local at the zero-indexed position given by the immediate operand. The immediate operand must be less than the sum of arguments and locals in scope.
 
@@ -241,6 +264,7 @@ LLOD $1 SP operand
 ```
 
 ## ``set 0`` 1 -> 0
+
 This will write to the argument or local at the zero-indexed position given by the immediate operand. The immediate operand must be less than the sum of arguments and locals in scope. You can also overwrite arguments, because the caller does not reuse those. If the target is core URCL instructions, this should use the first translation for ``LSTR`` with ``$2`` as the temporary register.
 
 ```arm
@@ -296,7 +320,7 @@ Stops execution of the program, so the CPU or emulator needs to be manually rese
 HLT
 ```
 
-## ``in %port`` -> 1
+## ``in %port`` 0 -> 1
 
 Reads from a port.
 

@@ -1,3 +1,6 @@
+BITS 8
+MINHEAP 0
+MINSTACK 200
 PSH ~+2
 JMP .func_main
 HLT
@@ -8,18 +11,24 @@ HLT
 .data_vtable_or_something [ .func_func_fib ]
 .func_fib
 LLOD $1 SP 0
-IMM $2 0
-BRE .label_3_9_fib_base_case $1 $2
-LLOD $1 SP 0
-IMM $2 1
-BRE .label_3_9_fib_base_case $1 $2
-LLOD $1 SP 0
-IMM $2 1
-SUB $1 $1 $2
-PSH ~+3
+MOV $2 $1
+IMM $3 0
+BRE .label_3_9_fib_base_case $2 $3
+MOV $2 $1
+IMM $3 1
+BRE .label_3_9_fib_base_case $2 $3
+MOV $2 $1
+IMM $3 1
+SUB $2 $2 $3
 PSH $1
+PSH ~+3
+PSH $2
 JMP .func_fib
-LLOD $2 SP 0
+MOV $2 $1
+POP $1
+MOV $3 $1
+MOV $1 $2
+MOV $2 $3
 IMM $3 2
 SUB $2 $2 $3
 PSH $1
@@ -32,7 +41,6 @@ ADD $1 $1 $2
 ADD SP SP 1
 RET
 .label_3_9_fib_base_case
-LLOD $1 SP 0
 ADD SP SP 1
 RET
 .func_main

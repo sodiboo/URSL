@@ -1,20 +1,67 @@
-mod defs;
-mod exts;
+mod common;
+mod mangle;
+mod permutation;
+mod urcl;
+mod ursl;
 
-use defs::*;
-use exts::*;
+pub use common::*;
+pub use permutation::*;
 
 use clap::Parser;
+use num::Num;
 use std::{
     collections::{BTreeMap, HashMap},
+    fmt::Debug,
     fs::{self, File},
     io::{self, Write},
 };
 use tree_sitter::{Node, TreeCursor};
 
+pub trait NodeExt {
+    fn pos(&self) -> Position;
+    fn end_pos(&self) -> Position;
+    fn text<'a>(&self, source: &'a str) -> &'a str;
+    fn field(&self, name: &str) -> Self;
+}
+
+impl NodeExt for Node<'_> {
+    fn pos(&self) -> Position {
+        self.start_position().into()
+    }
+
+    fn end_pos(&self) -> Position {
+        self.end_position().into()
+    }
+
+    fn text<'a>(&self, source: &'a str) -> &'a str {
+        &source[self.byte_range()]
+    }
+
+    fn field(&self, name: &str) -> Self {
+        self.child_by_field_name(name)
+            // breaks "expect" convention, but this is also expected to be None very often, so the panic message should be user-facing
+            .expect("Badly formatted syntax tree")
+    }
+}
+
+pub trait StrExt {
+    fn trim1(&self, ch: char) -> &Self;
+}
+
+impl StrExt for str {
+    // This function is used to trim off the leading, irrelevant character in terminal symbols
+    // The reason they're not just fields is so labels don't match `:   name`, but only `:name`
+    // likewise @macro .label $func #0 $0 shouldn't match @ macro . label $ func # 0 $ 0
+    // and this function is used to trim that leading char
+    fn trim1(&self, ch: char) -> &Self {
+        assert_eq!(self.chars().nth(0).unwrap(), ch);
+        &self[1..]
+    }
+}
+
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
-struct Args {
+pub struct Args {
     #[clap(short, long = "input-file")]
     input: String,
 
@@ -33,7 +80,7 @@ struct Args {
     #[clap(short, long)]
     verbose: bool,
 
-    /// Allocates locals in bulk by subtracting the desired amount from the stack pointer. By default, they are overwritten to be zero when used. Bulk allocation will be somewhat faster, especially with many locals, but changes code behaviour. This is an optimization that is only safe when your code definitely assigns locals before reading them.
+    /// Allocates locals in bulk by subtracting the desired amount from the stack pointer. By default, they are overwritten to be zero when used. Bulk allocation will be somewhat faster, especially with many locals, but changes code behaviour. As such, this is an optimization that is only safe when your code definitely assigns locals before reading them. Some URCL environments may check for stack overflow with PSH, and they may not catch stack overflows with this option set either. As such, this is an optimization that should only be done when you're sure your code is non-recursive and you want to prioritize stack code size at all costs
     #[clap(long)]
     garbage_initialized_locals: bool,
 
@@ -42,147 +89,50 @@ struct Args {
     minimal: bool,
 }
 
-fn parse_literal<'a>(node: Node, source: &'a str) -> Literal<'a> {
-    match node.kind() {
-        "char_literal" => {
-            let char_literal_value = node.field("value");
-            match char_literal_value.kind() {
-                "char" => {
-                    let char_text = char_literal_value.text(source);
-                    assert_eq!(char_text.len(), 1);
-                    let ch = char_text.chars().nth(0).unwrap();
-                    Literal::Char(ch)
-                }
-                "char_escape" => {
-                    let char_text = char_literal_value.text(source);
-                    assert_eq!(char_text.len(), 2);
-                    let ch = char_text.chars().nth(1).unwrap();
-                    Literal::CharEscape(ch)
-                }
-                _ => {
-                    panic!("Invalid value for char_literal, maybe the source file contained an error or extra node? Error at {}", node.pos());
-                }
-            }
-        }
-        "number" => Literal::Num(parse_num(node.text(source))),
-        "macro" => Literal::Macro(&node.text(source)[1..]), // trim @
-        "data_label" => Literal::Label(&node.text(source)[1..]), // trim .
-        "function_name" => Literal::Func(&node.text(source)[1..]), // trim $
-        "mem" => Literal::Mem(node.text(source)[1..].parse::<u64>().unwrap()), // trim #
-        _ => {
-            panic!("Invalid value for literal, maybe the source file contained an error or extra node? Error at {}", node.pos());
-        }
-    }
-}
-
-fn parse_urcl_source<'a>(args: &Args, node: Node, source: &'a str) -> UrclSource<'a> {
-    if node.kind() == "register" {
-        UrclSource::Register(node.field("idx").text(source).parse::<u64>().unwrap())
-    } else {
-        UrclSource::Literal(lower_literal(args, parse_literal(node, source)))
-    }
-}
-
-fn parse_num(text: &str) -> u64 {
-    if text.starts_with("0x") {
-        let digits = &text[2..];
-        u64::from_str_radix(digits, 16).unwrap()
-    } else if text.starts_with("0b") {
-        let digits = &text[2..];
-        u64::from_str_radix(digits, 2).unwrap()
-    } else if text.starts_with("0o") {
-        let digits = &text[2..];
-        u64::from_str_radix(digits, 8).unwrap()
-    } else {
-        text.parse::<u64>().unwrap()
-    }
-}
-
-// these functions ensure all labels in a program are unique. these can be parsed back into the original data they were mangled from, which isn't actually necessary, but is an intuitive proof that they'll all be unique
-fn mangle_data_label(label: &str) -> String {
-    format!("data_{}", label)
-}
-
-fn mangle_local_label(function: &str, label: &str) -> String {
-    format!(
-        "label_{}_{}_{}_{}",
-        function.len(),
-        label.len(),
-        function,
-        label
-    )
-}
-
-fn mangle_function_name(function: &str) -> String {
-    format!("func_{}", function)
-}
-
-fn lower_literal<'a>(args: &Args, element: Literal<'a>) -> Literal<'a> {
-    let mut element = element;
-    if args.emit_chars_literally {
-        element = if let Literal::CharEscape(escape) = element {
-            Literal::Char(match escape {
-                '\'' => '\'',
-                '\\' => '\\',
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                '0' => '\0',
-                _ => panic!("Unknown escape sequence (unreachable)"),
-            })
-        } else {
-            element
-        }
-    }
-    if args.emit_chars_as_numbers {
-        element = if let Literal::Char(ch) = element {
-            Literal::Num(ch as u64)
-        } else {
-            element
-        }
-    }
-    element
+pub struct Headers {
+    bits: u64,
+    minheap: usize,
+    minstack: usize,
 }
 
 fn main() -> io::Result<()> {
-    let args = &{
-        let mut a = Args::parse();
-        if a.emit_chars_as_numbers {
-            a.emit_chars_literally = true;
-        }
-        a
+    let mut args = Args::parse();
+    if args.emit_chars_as_numbers {
+        args.emit_chars_literally = true;
+    }
+    let source = &fs::read_to_string(&args.input).unwrap();
+    let tree = {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(tree_sitter_ursl::language())
+            .expect("Error loading language data");
+        parser
+            .parse(source, None)
+            .expect("Badly formatted syntax tree")
     };
-    let mut parser = tree_sitter::Parser::new();
-    parser.set_language(tree_sitter_ursl::language()).unwrap();
-    let source = fs::read_to_string(&args.input).unwrap();
-    let tree = parser.parse(&source, None).unwrap();
-    let mut cursor = tree.root_node().walk();
-    let mut dummy_cursor = cursor.clone();
+    let tree = tree.root_node();
+    let headers = &parse_headers(tree.field("headers"), source);
+    let cursor = &mut tree.walk();
+    let args = &args;
     let defs = {
         let mut defs = Vec::<(&str, DefValue)>::new();
-        if !cursor.down() {
-            panic!("File parsed to an empty syntax tree. Am i a joke to you?");
-        }
-        while cursor.node().kind() == "definition" {
-            let label = &cursor.node().field("label").text(&source)[1..]; // trim .
-            let value_node = cursor.node().field("value");
+        for node in tree.children_by_field_name("data", cursor).collect::<Vec<_>>() {
+            let label = node.field("label").text(source).trim1('.');
+            let value_node = node.field("value");
             let value: DefValue = match value_node.kind() {
-                "array" => {
-                    assert_eq!(value_node.kind(), "array");
-                    DefValue::Array(
-                        value_node
-                            .named_children(&mut dummy_cursor)
-                            .filter(|node| node.kind() != "comment")
-                            .map(|node| lower_literal(&args, parse_literal(node, &source)))
-                            .collect(),
-                    )
-                }
-                _ => DefValue::Single(lower_literal(args, parse_literal(value_node, &source))),
+                "array" => DefValue::Array(
+                    value_node
+                        .children_by_field_name("items", cursor)
+                        .map(|node| lower_literal(&args, headers, parse_literal(node, &source)))
+                        .collect(),
+                ),
+                _ => DefValue::Single(lower_literal(
+                    args,
+                    headers,
+                    parse_literal(value_node, &source),
+                )),
             };
             defs.push((label, value));
-            if !cursor.next() {
-                panic!("No functions")
-            }
         }
         defs
     };
@@ -193,7 +143,13 @@ fn main() -> io::Result<()> {
         }
     }
 
-    let functions = parse_functions(args, &mut cursor, &source);
+    let functions = parse_functions(
+        args,
+        headers,
+        tree.children_by_field_name("code", cursor).collect(),
+        source,
+        cursor,
+    );
 
     let main_locals = if let Some(main) = functions.get("$main") {
         assert_eq!(main.stack.input, 0, "$main may not take any arguments");
@@ -209,15 +165,19 @@ fn main() -> io::Result<()> {
 
     let mut f = File::create(&args.output)?;
 
+    writeln!(f, "BITS {}", headers.bits)?;
+    writeln!(f, "MINHEAP {}", headers.minheap)?;
+    writeln!(f, "MINSTACK {}", headers.minstack)?;
+
     writeln!(f, "PSH ~+2")?;
     if main_locals != 0 {
         writeln!(f, "SUB SP SP {main_locals}")?;
     }
-    writeln!(f, "JMP .{}", mangle_function_name("main"))?;
+    writeln!(f, "JMP .{}", mangle::function_name("main"))?;
     writeln!(f, "HLT")?;
 
     for (label, val) in defs {
-        writeln!(f, ".{} {val}", mangle_data_label(label))?;
+        writeln!(f, ".{} {val}", mangle::data_label(label))?;
     }
 
     for func in functions.values() {
@@ -226,199 +186,20 @@ fn main() -> io::Result<()> {
             ref instructions,
         } = func.body
         {
-            assert!(!instructions.is_empty()); // empty instruction lists are only allowed for -> 0, and parsing normalizes them to end with a ret
-            let name = &func.name[1..]; // trim $ prefix
-            writeln!(f, ".{}", mangle_function_name(name))?;
-            if args.garbage_initialized_locals {
-                if func.stack.input != 0 {
-                    writeln!(f, "SUB SP SP {locals}")?;
-                }
-            } else {
-                for _ in 0..locals {
-                    writeln!(f, "PSH 0")?;
-                }
-            }
-            let map_loc = |idx| {
-                // this is really just (idx - func.stack.input) % (func.stack.input + locals)
-                // but i think this is cleaner?
-                // this is required because, for function pointers to work, the function needs to allocate its own locals
-                // and with that, the locals are at the bottom, so that it doesn't have to move arguments to make space for locals
-                // but i didn't wanna change behaviour since i quite like `get 0` being arg 0
-                // however, the actual output still needs to bend around the new memory layout
-                // which is why this closure exists
-                if idx < func.stack.input {
-                    // idx is referring to an arg
-                    idx + locals
-                } else {
-                    // idx is referring to a local
-                    idx - func.stack.input
-                }
-            };
-            for entry in instructions {
-                if args.verbose {
-                    write!(f, "// +{}; {} -> ", entry.excess_height, entry.enter_height)?;
-                    match entry.exit_height {
-                        Some(n) => writeln!(f, "{n}")?,
-                        None => writeln!(f, "?")?,
-                    }
-                }
-                if let Some(label) = entry.label {
-                    writeln!(f, ".{}", mangle_local_label(name, label))?;
-                }
-                let excess_height = entry.excess_height;
-                let r1 = excess_height + 1;
-                let emit_inline = |f: &mut File,
-                                   instructions: &Vec<UrclInstructionEntry>,
-                                   branch_target|
-                 -> io::Result<()> {
-                    Ok(for entry in instructions {
-                        match &entry.instruction {
-                            UrclInstruction::In { dest, port } => writeln!(
-                                f,
-                                "IN ${} %{port}",
-                                match dest {
-                                    0 => 0,
-                                    n => excess_height + n,
-                                }
-                            )?,
-                            UrclInstruction::Out { port, source } => {
-                                writeln!(f, "OUT %{port} {}", source.emit(excess_height))?
-                            }
-                            UrclInstruction::Jmp { dest } => {
-                                writeln!(f, "JMP {}", dest.emit(branch_target))?
-                            }
-
-                            UrclInstruction::Unary { op, dest, source } => writeln!(
-                                f,
-                                "{op} {} {}",
-                                dest.emit(excess_height, branch_target),
-                                source.emit(excess_height)
-                            )?,
-                            UrclInstruction::Binary {
-                                op,
-                                dest,
-                                source1,
-                                source2,
-                            } => writeln!(
-                                f,
-                                "{op} {} {} {}",
-                                dest.emit(excess_height, branch_target),
-                                source1.emit(excess_height),
-                                source2.emit(excess_height)
-                            )?,
-                        }
-                    })
-                };
-                match entry.instruction {
-                    Instruction::Ret => {
-                        writeln!(f, "ADD SP SP {}", func.stack.input + locals)?;
-                        writeln!(f, "RET")?;
-                    }
-                    Instruction::Halt => writeln!(f, "HLT")?,
-                    Instruction::Const(ref lit) => writeln!(f, "IMM ${r1} {lit}")?,
-                    Instruction::Get(idx) => writeln!(f, "LLOD ${r1} SP {}", map_loc(idx))?,
-                    Instruction::Set(idx) => writeln!(f, "LSTR SP {} ${r1}", map_loc(idx))?,
-                    Instruction::In(port) => writeln!(f, "IN ${r1} %{port}")?,
-                    Instruction::Out(port) => writeln!(f, "OUT %{port} ${r1}")?,
-                    Instruction::Jump(label) => {
-                        writeln!(f, "JMP .{}", mangle_local_label(name, label))?
-                    }
-                    Instruction::Branch(prefix, label) => {
-                        if let Some(Function {
-                            body:
-                                FunctionBody::Urcl {
-                                    branch: Some(branch),
-                                    ..
-                                },
-                            ..
-                        }) = functions.get(prefix)
-                        {
-                            emit_inline(&mut f, branch, Some(&mangle_local_label(name, label)))?;
-                        } else {
-                            panic!("Already checked that func exists. This should be unreachable.")
-                        }
-                    }
-                    Instruction::Perm(ref perm) => {
-                        emit_inline(&mut f, &compile_permutation(perm, entry.pos), None)?;
-                    }
-                    Instruction::Call(func) => {
-                        if let Some(func) = functions.get(func) {
-                            match func.body {
-                                FunctionBody::Urcl {
-                                    ref instructions, ..
-                                } => emit_inline(&mut f, instructions, None)?,
-                                FunctionBody::Ursl { .. } => {
-                                    if args.verbose {
-                                        writeln!(f, "// begin call {}", func.name)?;
-                                    }
-                                    for i in 1..=excess_height {
-                                        writeln!(f, "PSH ${i}")?;
-                                    }
-                                    writeln!(
-                                        f,
-                                        "PSH ~+{}", // return pointer
-                                        // 2 because of the jump, and we want the inst *after* that
-                                        2 + func.stack.input
-                                    )?;
-                                    for i in 1..=func.stack.input {
-                                        writeln!(f, "PSH ${}", excess_height + i)?;
-                                    }
-                                    writeln!(f, "JMP .{}", mangle_function_name(&func.name[1..]))?; // trim $ prefix
-
-                                    if args.verbose {
-                                        writeln!(f, "// return from {}", func.name)?;
-                                    }
-                                    if excess_height != 0 {
-                                        for i in 1..=func.stack.output {
-                                            writeln!(f, "MOV ${} ${i}", i + excess_height)?;
-                                        }
-                                        for i in (1..=excess_height).rev() {
-                                            writeln!(f, "POP ${i}")?;
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            panic!("Already checked that func exists. This should be unreachable.")
-                        }
-                    }
-                    Instruction::IndirectCall(stack) => {
-                        let func = excess_height + 1;
-                        if args.verbose {
-                            writeln!(f, "// begin icall {stack}")?;
-                        }
-                        for i in 1..=excess_height {
-                            writeln!(f, "PSH ${i}")?;
-                        }
-                        writeln!(
-                            f,
-                            "PSH ~+{}", // return pointer
-                            // 2 because of the jump, and we want the inst *after* that
-                            2 + stack.input
-                        )?;
-                        for i in 1..=stack.input {
-                            writeln!(f, "PSH ${}", func + i)?;
-                        }
-                        writeln!(f, "JMP ${func}")?;
-
-                        if args.verbose {
-                            writeln!(f, "// return from icall")?;
-                        }
-                        if excess_height != 0 {
-                            for i in 1..=stack.output {
-                                writeln!(f, "MOV ${} ${i}", i + excess_height)?;
-                            }
-                            for i in (1..=excess_height).rev() {
-                                writeln!(f, "POP ${i}")?;
-                            }
-                        }
-                    }
-                }
-            }
+            ursl::emit_instructions(args, &mut f, &functions, func, locals, instructions)?
         }
     }
 
     Ok(())
+}
+
+fn parse_headers(node: Node, source: &str) -> Headers {
+    assert_eq!(node.kind(), "headers");
+    Headers {
+        bits: parse_num(node.field("bits").text(source)),
+        minheap: parse_num(node.field("minheap").text(source)),
+        minstack: parse_num(node.field("minstack").text(source)),
+    }
 }
 
 fn parse_stack_sig(node: Node, source: &str) -> StackBehaviour {
@@ -435,43 +216,7 @@ fn parse_stack(node: Node, source: &str) -> StackBehaviour {
     }
 }
 
-fn parse_permutation(node: Node, source: &str) -> Permutation {
-    assert_eq!(node.kind(), "permutation");
-    let mut cursor = node.walk();
-    let mut inputs = HashMap::new();
-    for (i, node) in node
-        .field("input")
-        .children_by_field_name("items", &mut cursor)
-        .enumerate()
-    {
-        let name = node.text(source);
-        if let Some(&(other, _)) = inputs.get(name) {
-            panic!(
-                "Duplicate identifier in permutation input at {other} and {}",
-                node.pos()
-            );
-        }
-        inputs.insert(name, (node.pos(), i as u64));
-    }
-
-    Permutation {
-        input: inputs.len() as u64,
-        output: node
-            .field("output")
-            .children_by_field_name("items", &mut cursor)
-            .map(|node| {
-                let name = node.text(source);
-                if let Some(&(_, index)) = inputs.get(name) {
-                    index
-                } else {
-                    panic!("Unknown identifier in permutation output at {}", node.pos());
-                }
-            })
-            .collect(),
-    }
-}
-
-fn parse_locals(node: Node, source: &str) -> u64 {
+fn parse_locals(node: Node, source: &str) -> usize {
     match node.child_by_field_name("locals") {
         Some(node) => parse_num(node.text(source)),
         None => 0,
@@ -507,20 +252,21 @@ fn parse_label<'a, T: PositionEntry>(
 
 fn parse_functions<'a>(
     args: &Args,
-    cursor: &mut TreeCursor<'a>,
+    headers: &Headers,
+    funcs: Vec<Node<'a>>,
     source: &'a str,
+    cursor: &mut TreeCursor<'a>,
 ) -> BTreeMap<&'a str, Function<'a>> {
     // btreemap ensures deterministic ordering when writing output
     let mut functions = BTreeMap::<&'a str, Function<'a>>::new();
     let mut signatures = HashMap::<&'a str, (StackBehaviour, bool)>::new();
-    let mut nodes = HashMap::<&'a str, Node<'a>>::new();
+    let mut instruction_nodes = HashMap::new();
 
     if !args.minimal {
         std_instructions(&mut functions, &mut signatures);
     }
 
-    loop {
-        let node = cursor.node();
+    for node in funcs {
         match node.kind() {
             "func" => {
                 let stack = parse_stack_sig(node, source);
@@ -539,7 +285,7 @@ fn parse_functions<'a>(
                     },
                 );
                 signatures.insert(name, (stack, false));
-                nodes.insert(name, node.field("instructions"));
+                instruction_nodes.insert(name, node);
             }
             "inst" => {
                 let stack = parse_stack_sig(node, source);
@@ -550,15 +296,24 @@ fn parse_functions<'a>(
                 if let Some(f) = functions.get(&name) {
                     panic!("inst {name} at {} is also defined at {}", node.pos(), f.pos);
                 }
-                let instructions =
-                    parse_urcl_instructions(args, &node.field("instructions"), name, source, None);
+                let instructions = urcl::parse_instructions(
+                    args,
+                    headers,
+                    node.children_by_field_name("instructions", cursor).collect(),
+                    name,
+                    None,
+                    source,
+                    cursor,
+                );
                 let branch = node.child_by_field_name("branch").map(|branch_clause| {
-                    parse_urcl_instructions(
+                    urcl::parse_instructions(
                         args,
-                        &branch_clause.field("instructions"),
+                        headers,
+                        branch_clause.children_by_field_name("instructions", cursor).collect(),
                         name,
-                        source,
                         Some(&branch_clause.field("label").text(source)[1..]), // trim :
+                        source,
+                        cursor,
                     )
                 });
                 let is_branch = branch.is_some();
@@ -584,9 +339,9 @@ fn parse_functions<'a>(
             }
             "inst_permutation" => {
                 let name = node.field("name").text(source);
-                let perm = parse_permutation(node.field("permutation"), source);
+                let perm = parse_permutation_sig(node.field("permutation"), source, cursor);
                 let instructions = compile_permutation(&perm, node.pos());
-                let stack = stack!(perm.input; -> perm.output.len() as u64);
+                let stack = stack!(perm.input; -> perm.output.len());
                 functions.insert(
                     name,
                     Function {
@@ -606,9 +361,6 @@ fn parse_functions<'a>(
                 node.pos()
             ),
         }
-        if !cursor.next() {
-            break;
-        }
     }
 
     for func in functions.values_mut() {
@@ -618,16 +370,18 @@ fn parse_functions<'a>(
                 instructions,
             } => {
                 let locals = *locals;
-                let node = nodes.get(func.name).unwrap();
-                parse_instructions(
+                let node = instruction_nodes.remove(func.name).unwrap();
+                ursl::parse_instructions(
                     args,
+                    headers,
                     &signatures,
-                    &node,
+                    node.children_by_field_name("instructions", cursor).collect(),
                     func.name,
                     func.stack.input + locals,
                     func.stack.output,
                     instructions,
                     source,
+                    cursor,
                 );
                 if args.verbose {
                     println!("func {} : {} + {locals} {{", func.name, func.stack);
@@ -637,10 +391,10 @@ fn parse_functions<'a>(
                         }
                         println!("  {}", entry.instruction);
                         match entry.instruction {
-                            Instruction::Ret
-                            | Instruction::Halt
-                            | Instruction::Jump(_)
-                            | Instruction::Branch(_, _) => println!(),
+                            ursl::Instruction::Ret
+                            | ursl::Instruction::Halt
+                            | ursl::Instruction::Jump(_)
+                            | ursl::Instruction::Branch(_, _) => println!(),
                             _ => (),
                         }
                     }
@@ -670,364 +424,6 @@ fn parse_functions<'a>(
     functions
 }
 
-fn parse_instructions<'a>(
-    args: &Args,
-    signatures: &HashMap<&str, (StackBehaviour, bool)>,
-    node: &Node,
-    func_name: &'a str,
-    locals: u64,
-    returns: u64,
-    instructions: &mut Vec<InstructionEntry<'a>>,
-    source: &'a str,
-) {
-    assert_eq!(node.kind(), "instruction_list");
-    let mut height = Some(0);
-    let mut cursor = node.walk();
-    let mut labels = HashMap::<&'a str, usize>::new();
-    cursor.down();
-    // skips {
-    while cursor.next() {
-        let inst = cursor.node();
-        if inst.kind() == "}" {
-            break;
-        }
-        let label = parse_label(inst, &labels, &instructions, func_name, source);
-
-        macro_rules! op {
-            () => {
-                inst.field("operand")
-            };
-            (stack) => {
-                parse_stack(op!(), source)
-            };
-            (num) => {
-                parse_num(op!().text(source))
-            };
-            (literal) => {
-                lower_literal(args, parse_literal(op!(), source))
-            };
-            (func) => {
-                op!().text(source)
-            };
-            (label) => {
-                &op!().text(source)[1..] // trim :
-            };
-            (port) => {
-                &op!().text(source)[1..] // trim %
-            };
-            (loc) => {{
-                let idx = op!(num);
-                assert!(
-                    idx < locals,
-                    "Out of bounds local variable at {}",
-                    inst.pos()
-                );
-                idx
-            }};
-            (perm) => {
-                parse_permutation(op!(), source)
-            };
-        }
-
-        macro_rules! inst {
-            ($height:ident => $e:expr) => {
-                {
-                    let $height = height.unwrap_or_else(|| panic!("Unknown stack height at {}", inst.pos()));
-                    $e
-                }
-            };
-
-            ($inst:expr; $in:literal -> $out:literal) => { inst!($inst; stack!($in; -> $out)) };
-            ($inst:expr; $stack:expr) => {
-                inst!(enter_height => {
-                    let excess_height = enter_height.checked_sub($stack.input).unwrap_or_else(|| panic!("Stack underflow at {}", inst.pos()));
-                    InstructionEntry {
-                        label,
-                        excess_height,
-                        enter_height,
-                        exit_height: Some(excess_height + $stack.output),
-                        instruction: $inst,
-                        pos: inst.pos(),
-                    }
-                })
-            }
-        }
-        let entry = match inst.kind() {
-            "height" => {
-                assert_eq!(label, None, "Height directive cannot be labeled at {}. Did you mean to put the label *after* it?", inst.pos());
-                let operand = op!(num);
-                height = match height {
-                    Some(height) => {
-                        assert_eq!(
-                            height,
-                            operand,
-                            "Height directive at {} doesn't match the correct stack height",
-                            inst.pos()
-                        );
-                        Some(height)
-                    }
-                    None => Some(operand),
-                };
-                continue;
-            }
-            "perm" => {
-                let operand = op!(perm);
-                inst!(Instruction::Perm(operand); stack!(operand.input; -> operand.output.len() as u64))
-            }
-            "const" => inst!(Instruction::Const(op!(literal)); 0 -> 1),
-            "call" => {
-                let operand = op!(func);
-                let (stack, _) = signatures.get(operand).unwrap_or_else(|| {
-                    panic!("Call to unknown func {} at {}", operand, inst.pos())
-                });
-                inst!(Instruction::Call(operand); stack)
-            }
-            "icall" => {
-                let stack = op!(stack);
-                inst!(Instruction::IndirectCall(stack); stack!(stack.input + 1; -> stack.output))
-            }
-            "get" => inst!(Instruction::Get(op!(loc)); 0 -> 1),
-            "set" => inst!(Instruction::Set(op!(loc)); 1 -> 0),
-
-            "in" => inst!(Instruction::In(op!(port)); 0 -> 1),
-            "out" => inst!(Instruction::Out(op!(port)); 1 -> 0),
-            "jump" => inst!(enter_height => InstructionEntry {
-                label,
-                excess_height: enter_height,
-                enter_height,
-                exit_height: None,
-                instruction: Instruction::Jump(op!(label)),
-                pos: inst.pos(),
-            }),
-            "branch" => inst! { enter_height => {
-                let opcode = inst.field("opcode").text(source);
-                if let Some((stack, branching)) = signatures.get(opcode) {
-                    if !branching {
-                        panic!("Branch following instruction without a branching variant at {}", inst.pos());
-                    }
-                    assert_eq!(stack.output, 1);
-                    let excess_height = enter_height.checked_sub(stack.input).unwrap_or_else(|| panic!("Stack underflow at {}", inst.pos()));
-                    InstructionEntry {
-                        label,
-                        enter_height,
-                        excess_height,
-                        exit_height: Some(excess_height),
-                        instruction: Instruction::Branch(opcode, op!(label)),
-                        pos: inst.pos(),
-                    }
-                } else {
-                    panic!("Branch with undefined instruction at {}", inst.pos())
-                }
-            }},
-            // This is matching a node kind. All of the above are special in the grammar, because of operands, and their node kind matches the instruction.
-            // This one is just called "instruction" because it's all zero-operand instructions, including custom instructions
-            // Really all of these ought to be nested matches, but i don't think that's possible with tree-sitter
-            "instruction" => match inst.field("opcode").text(source) {
-                "ret" => inst!(enter_height => {
-                    assert_eq!(enter_height, returns, "Bad stack height (returns {enter_height}, but should return {returns})");
-                    InstructionEntry {
-                        label,
-                        excess_height: 0,
-                        enter_height,
-                        exit_height: None,
-                        instruction: Instruction::Ret,
-                        pos: inst.pos(),
-                    }
-                }),
-                "halt" => inst!(enter_height => InstructionEntry {
-                        label,
-                        excess_height: enter_height,
-                        enter_height,
-                        exit_height: None,
-                        instruction: Instruction::Halt,
-                        pos: inst.pos(),
-                }),
-
-                inst => {
-                    let (stack, _) = signatures
-                        .get(inst)
-                        .unwrap_or_else(|| panic!("Unknown instruction {}", inst));
-                    inst!(Instruction::Call(inst); stack)
-                }
-            },
-            // Unknown *node kind*
-            unknown => panic!(
-                "Invalid node type `{}` (expected some kind of instruction)",
-                unknown
-            ),
-        };
-        if let Some(label) = label {
-            labels.insert(label, instructions.len());
-        }
-        height = entry.exit_height;
-        instructions.push(entry);
-    }
-    for entry in instructions.iter() {
-        if let Instruction::Jump(label) | Instruction::Branch(_, label) = entry.instruction {
-            let dest = &instructions[*labels.get(label).unwrap_or_else(|| {
-                panic!("Branch or jump to unknown label {}:{}", func_name, label)
-            })];
-            assert_eq!(
-                entry.excess_height, dest.enter_height,
-                "Incorrect stack height on branch (got {} but destination has {})",
-                entry.excess_height, dest.enter_height,
-            );
-        }
-    }
-    if returns == 0 {
-        if let Some(height) = height {
-            assert_eq!(
-                height, 0,
-                "Stack is not empty at the end of {func_name} (height is {height})",
-            );
-            instructions.push(InstructionEntry {
-                label: None,
-                excess_height: 0,
-                enter_height: 0,
-                exit_height: None,
-                instruction: Instruction::Ret,
-                pos: node.end_pos(),
-            });
-        }
-    } else {
-        assert!(
-            height.is_none(),
-            "func {} falls out of its scope without returning, jumping or halting.",
-            func_name,
-        );
-    }
-}
-
-fn parse_urcl_instructions<'a>(
-    args: &Args,
-    node: &Node,
-    func_name: &'a str,
-    source: &'a str,
-    branch_destination: Option<&'a str>,
-) -> Vec<UrclInstructionEntry<'a>> {
-    let mut cursor = node.walk();
-    let mut dummy_cursor = node.walk();
-
-    let mut instructions = Vec::<UrclInstructionEntry>::new();
-    let mut labels = HashMap::<&'a str, usize>::new();
-
-    let reg = |node: Node| node.field("idx").text(source).parse::<u64>().unwrap();
-
-    cursor.down(); // to "{"
-    while cursor.next() {
-        let inst = cursor.node();
-        if inst.kind() == "}" {
-            break;
-        }
-
-        if let Some(label) = parse_label(inst, &labels, &instructions, func_name, source) {
-            if let Some(branch_destination) = branch_destination {
-                if label == branch_destination {
-                    panic!("Duplicate label :{label} previously defined in branch destination, and also at {}", inst.pos());
-                }
-            }
-            labels.insert(label, instructions.len());
-        }
-
-        let entry = UrclInstructionEntry {
-            pos: inst.pos(),
-            instruction: match inst.kind() {
-                "jmp" => UrclInstruction::Jmp {
-                    dest: UrclBranchDestination::TemporaryLabel(
-                        &inst.field("dest").text(source)[1..], // trim :
-                    ),
-                },
-                "urcl_in" => UrclInstruction::In {
-                    dest: reg(inst.field("dest")),
-                    port: &inst.field("source").text(source)[1..], // trim %
-                },
-                "urcl_out" => UrclInstruction::Out {
-                    port: &inst.field("dest").text(source)[1..], // trim %
-                    source: parse_urcl_source(args, inst.field("source"), source),
-                },
-                "urcl_instruction" => {
-                    let dest = inst.field("dest");
-                    let source_operands = inst
-                        .children_by_field_name("source", &mut dummy_cursor)
-                        .map(|node| parse_urcl_source(args, node, source))
-                        .collect::<Vec<UrclSource>>();
-                    let op = inst.field("op").text(source);
-                    let dest = match dest.kind() {
-                        "register" => UrclDestination::Register(
-                            dest.field("idx").text(source).parse::<u64>().unwrap(),
-                        ),
-                        "inst_label" => UrclDestination::Branch(
-                            UrclBranchDestination::TemporaryLabel(dest.text(source)),
-                        ),
-                        _ => panic!("Unknown dest node type at {}", dest.pos()),
-                    };
-                    match &source_operands[..] {
-                        [src] => UrclInstruction::Unary {
-                            op,
-                            dest,
-                            source: src.clone(),
-                        },
-                        [src1, src2] => UrclInstruction::Binary {
-                            op,
-                            dest,
-                            source1: src1.clone(),
-                            source2: src2.clone(),
-                        },
-                        _ => panic!("Unknown source type at {}", inst.pos()),
-                    }
-                }
-
-                unknown => panic!("Unknown node kind {} at {}", unknown, inst.pos()),
-            },
-        };
-        instructions.push(entry);
-    }
-
-    for i in 0..instructions.len() {
-        let entry = instructions.get_mut(i).unwrap();
-        let lower = |dest| match dest {
-            UrclBranchDestination::TemporaryLabel(label) => {
-                if let Some(branch) = branch_destination {
-                    if label == branch {
-                        return UrclBranchDestination::BranchLabel;
-                    }
-                }
-                if let Some(pos) = labels.get(label) {
-                    UrclBranchDestination::Relative((*pos as i64) - (i as i64))
-                } else {
-                    panic!("Unknown label :{label} at {}", entry.pos)
-                }
-            }
-            _ => dest,
-        };
-        entry.instruction = match entry.instruction.clone() {
-            UrclInstruction::Jmp { dest } => UrclInstruction::Jmp { dest: lower(dest) },
-            UrclInstruction::Unary {
-                op,
-                dest: UrclDestination::Branch(dest),
-                source,
-            } => UrclInstruction::Unary {
-                op,
-                dest: UrclDestination::Branch(lower(dest)),
-                source,
-            },
-            UrclInstruction::Binary {
-                op,
-                dest: UrclDestination::Branch(dest),
-                source1,
-                source2,
-            } => UrclInstruction::Binary {
-                op,
-                dest: UrclDestination::Branch(lower(dest)),
-                source1,
-                source2,
-            },
-            other => other,
-        }
-    }
-    instructions
-}
-
 fn std_instructions<'a>(
     funcs: &mut BTreeMap<&'a str, Function<'a>>,
     sigs: &mut HashMap<&'a str, (StackBehaviour, bool)>,
@@ -1043,7 +439,7 @@ fn std_instructions<'a>(
                     instructions: inst!(e $($i)*),
                     branch,
                 },
-                pos: Position { row: 0, column: 0 },
+                pos: Default::default(),
             };
             sigs.insert(f.name, (f.stack, is_branch));
             funcs.insert(f.name, f);
@@ -1051,41 +447,41 @@ fn std_instructions<'a>(
         ($name:ident [$($in:ident)*] -> [$($out:ident)*]) => {{
             let mut names = HashMap::new();
             for (i, name) in <[&str]>::iter(&[$(stringify!($in),)*]).enumerate() {
-                names.insert(name, i as u64);
+                names.insert(name, i);
             }
             let p = Permutation {
-                input: names.len() as u64,
+                input: names.len(),
                 output: vec![$(names[&stringify!($out)],)*],
             };
             let f = Function {
                 name: stringify!($name),
-                stack: stack!(p.input; -> p.output.len() as u64),
+                stack: stack!(p.input; -> p.output.len()),
                 body: FunctionBody::Urcl {
-                    instructions: compile_permutation(&p, Position { row: 0, column: 0 }),
+                    instructions: compile_permutation(&p, Default::default()),
                     branch: None,
                 },
-                pos: Position { row: 0, column: 0 },
+                pos: Default::default(),
             };
             sigs.insert(f.name, (f.stack, false));
             funcs.insert(f.name, f);
         }};
         (i $inst:ident :dest $($s:tt)*) => {
-            inst!(p { $inst (UrclDestination::Branch(UrclBranchDestination::BranchLabel)) } $($s)*)
+            inst!(p { $inst (urcl::Destination::Branch(urcl::BranchDestination::BranchLabel)) } $($s)*)
         };
         (i $inst:ident R($r:literal) $($s:tt)*) => {
-            inst!(p { $inst (UrclDestination::Register($r)) } $($s)*)
+            inst!(p { $inst (urcl::Destination::Register($r)) } $($s)*)
         };
         (s ($($t:tt)*) R($s:literal) $($r:tt)*) => {
-            inst!(p { $($t)* (UrclSource::Register($s)) } $($r)*)
+            inst!(p { $($t)* (urcl::Source::Register($s)) } $($r)*)
         };
         (s ($($t:tt)*) $s:literal $($r:tt)*) => {
-            inst!(p { $($t)* (UrclSource::Literal(Literal::Num($s))) } $($r)*)
+            inst!(p { $($t)* (urcl::Source::Literal(Literal::Num($s))) } $($r)*)
         };
         (s ($($t:tt)*) @$s:ident $($r:tt)*) => {
-            inst!(p { $($t)* (UrclSource::Literal(Literal::Macro(stringify!($s)))) } $($r)*)
+            inst!(p { $($t)* (urcl::Source::Literal(Literal::Macro(stringify!($s)))) } $($r)*)
         };
         (d $inst:ident ($dest:expr) ($s1:expr) ($s2:expr)) => {
-            UrclInstruction::Binary {
+            urcl::Instruction::Binary {
                 op: stringify!($inst),
                 dest: $dest,
                 source1: $s1,
@@ -1093,7 +489,7 @@ fn std_instructions<'a>(
             }
         };
         (d $inst:ident ($dest:expr) ($s:expr)) => {
-            UrclInstruction::Unary {
+            urcl::Instruction::Unary {
                 op: stringify!($inst),
                 dest: $dest,
                 source: $s,
@@ -1108,9 +504,9 @@ fn std_instructions<'a>(
         (e) => { vec![] };
         (e $($i:tt)+) => {
             vec![
-                UrclInstructionEntry {
+                urcl::InstructionEntry {
                     instruction: inst!(i $($i)*),
-                    pos: Position { row: 0, column: 0 },
+                    pos: Default::default(),
                 }
             ]
         };
@@ -1128,8 +524,8 @@ fn std_instructions<'a>(
     inst! { store 2 -> 0 { STR R(1) R(2) } }
     inst! { copy 2 -> 0 { CPY R(1) R(2) } }
 
-    inst! { bool 1 -> 1 { SETNZ R(1) R(1) } branch { BNZ :dest R(1) R(2) } }
-    inst! { not 1 -> 1 { NOT R(1) R(1) } branch { BRE :dest R(1) 0 } }
+    inst! { bool 1 -> 1 { SETNZ R(1) R(1) } branch { BNZ :dest R(1) } }
+    inst! { not 1 -> 1 { NOT R(1) R(1) } branch { BNE :dest R(1) @MAX } }
 
     inst! { xor 2 -> 1 { XOR R(1) R(1) R(2) } }
     inst! { xnor 2 -> 1 { XNOR R(1) R(1) R(2) } }
@@ -1174,63 +570,4 @@ fn std_instructions<'a>(
     inst! { gte 2 -> 1 { SETGE R(1) R(1) R(2) } branch { BGE :dest R(1) R(2) } }
     inst! { lt 2 -> 1 { SETL R(1) R(1) R(2) } branch { BRL :dest R(1) R(2) } }
     inst! { lte 2 -> 1 { SETLE R(1) R(1) R(2) } branch { BLE :dest R(1) R(2) } }
-}
-
-fn compile_permutation<'a>(perm: &Permutation, pos: Position) -> Vec<UrclInstructionEntry<'a>> {
-    let mut movs = Vec::new();
-    let mut changes = Vec::new();
-    // src is the value, dest is the index, so they are swapped here and only here
-    // because for everything else they're tuples of (src, dest)
-    for (dest, &src) in perm.output.iter().enumerate() {
-        let dest = dest as u64;
-        if src != dest {
-            changes.push((src, dest));
-        }
-    }
-    {
-        // Changes that are written to a register that no other changes will read from. They are safe to do immediately.
-        let mut dangling = Vec::new();
-        loop {
-            for &(src, dest) in changes.iter() {
-                if !changes.iter().any(|&(s, _)| s == dest) {
-                    dangling.push((src, dest));
-                }
-            }
-            if dangling.is_empty() {
-                break;
-            }
-            for tuple @ (src, dest) in dangling.drain(..) {
-                changes.swap_remove(changes.iter().position(|&t| t == tuple).unwrap());
-                movs.push((src, dest));
-            }
-        }
-    }
-    {
-        // Circular references are the only ones left, so a temporary register is needed
-        let temp = perm.output.len() as u64;
-        while let Some((src, dest)) = changes.pop() {
-            let mut circular = vec![temp, src];
-            let mut last_dest = dest;
-            while last_dest != src {
-                let i = changes.iter().position(|&(s, _)| s == last_dest).unwrap();
-                let (_, dest) = changes.swap_remove(i);
-                circular.push(last_dest);
-                last_dest = dest;
-            }
-            circular.push(temp);
-            for i in 1..circular.len() {
-                movs.push((circular[i], circular[i - 1]));
-            }
-        }
-    }
-    movs.into_iter()
-        .map(|(src, dest)| UrclInstructionEntry {
-            instruction: UrclInstruction::Unary {
-                op: "MOV",
-                dest: UrclDestination::Register(1 + dest as u64),
-                source: UrclSource::Register(1 + src as u64),
-            },
-            pos,
-        })
-        .collect()
 }
