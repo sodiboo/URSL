@@ -1,57 +1,53 @@
 BITS 8
 MINHEAP 0
 MINSTACK 200
-PSH ~+2
-JMP .func_main
+MINREG 3
+CAL .func__main
 HLT
-.data_str [ 72 101 108 108 111 44 32 87 111 114 108 100 ]
-.data_escape 10
-.data_num 32
-.data_nums [ 1 2 3 4 @MAX ]
-.data_vtable_or_something [ .func_func_fib ]
-.func_fib
-LLOD $1 SP 0
+.data__str
+DW [ 'H' 'e' 'l' 'l' 'o' ',' 32 'W' 'o' 'r' 'l' 'd' ]
+.data__escape
+DW '\n'
+.data__num
+DW 32
+.data__nums
+DW [ 1 2 3 4 @MAX ]
+.data__vtable_under_or_under_something
+DW [ .func__fib ]
+.func__fib
+LLOD $1 SP 1
+IMM $2 0
+MOV $3 $2
 MOV $2 $1
-IMM $3 0
-BRE .label_3_9_fib_base_case $2 $3
+BRE .label__fib__base_under_case $2 $3
+IMM $2 1
+MOV $3 $2
 MOV $2 $1
-IMM $3 1
-BRE .label_3_9_fib_base_case $2 $3
-MOV $2 $1
-IMM $3 1
-SUB $2 $2 $3
-PSH $1
-PSH ~+3
-PSH $2
-JMP .func_fib
-MOV $2 $1
-POP $1
+BRE .label__fib__base_under_case $2 $3
+IMM $2 1
 MOV $3 $1
-MOV $1 $2
-MOV $2 $3
+SUB $3 $3 $2
+PSH $1
+PSH $3
+CAL .func__fib
+ADD SP SP 1
+POP $2
 IMM $3 2
 SUB $2 $2 $3
 PSH $1
-PSH ~+3
 PSH $2
-JMP .func_fib
-MOV $2 $1
-POP $1
-ADD $1 $1 $2
+CAL .func__fib
 ADD SP SP 1
-RET
-.label_3_9_fib_base_case
-ADD SP SP 1
-RET
-.func_main
-IMM $1 20
-IMM $2 .func_fib
-MOV $3 $1
+POP $2
+ADD $2 $2 $1
 MOV $1 $2
-MOV $2 $3
-PSH ~+3
-PSH $2
-JMP $1
-OUT %NUMB $1
-ADD SP SP 0
 RET
+.label__fib__base_under_case
+RET
+.func__main
+IMM $1 20
+IMM $2 .func__fib
+PSH $1
+CAL $2
+ADD SP SP 1
+OUT %NUMB $1

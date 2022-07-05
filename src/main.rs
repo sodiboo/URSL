@@ -10,64 +10,66 @@ pub use permutation::*;
 use clap::Parser;
 use num::Num;
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, HashMap},
     fmt::Debug,
     fs::{self, File},
     io::{self, Write},
+    iter,
 };
-use tree_sitter::{Node, TreeCursor};
+use tree_sitter::{Node, Tree};
 
-pub trait NodeExt {
-    fn pos(&self) -> Position;
-    fn end_pos(&self) -> Position;
-    fn text<'a>(&self, source: &'a str) -> &'a str;
-    fn field(&self, name: &str) -> Self;
+pub trait NodeExt<'a> {
+    fn pos(&self, unit: &'a CompilationUnit<'a>) -> Position<'a>;
+    fn text(&self, unit: &'a CompilationUnit<'a>) -> &'a str;
+    fn field(&self, name: &str, unit: &'a CompilationUnit<'a>) -> Self;
 }
 
-impl NodeExt for Node<'_> {
-    fn pos(&self) -> Position {
-        self.start_position().into()
+impl<'a> NodeExt<'a> for Node<'a> {
+    fn pos(&self, unit: &'a CompilationUnit<'a>) -> Position<'a> {
+        Position {
+            unit,
+            range: self.range(),
+        }
     }
 
-    fn end_pos(&self) -> Position {
-        self.end_position().into()
+    fn text(&self, unit: &'a CompilationUnit<'a>) -> &'a str {
+        &unit.source[self.byte_range()]
     }
 
-    fn text<'a>(&self, source: &'a str) -> &'a str {
-        &source[self.byte_range()]
-    }
-
-    fn field(&self, name: &str) -> Self {
+    fn field(&self, name: &str, unit: &'a CompilationUnit<'a>) -> Self {
         self.child_by_field_name(name)
             // breaks "expect" convention, but this is also expected to be None very often, so the panic message should be user-facing
-            .expect("Badly formatted syntax tree")
-    }
-}
-
-pub trait StrExt {
-    fn trim1(&self, ch: char) -> &Self;
-}
-
-impl StrExt for str {
-    // This function is used to trim off the leading, irrelevant character in terminal symbols
-    // The reason they're not just fields is so labels don't match `:   name`, but only `:name`
-    // likewise @macro .label $func #0 $0 shouldn't match @ macro . label $ func # 0 $ 0
-    // and this function is used to trim that leading char
-    fn trim1(&self, ch: char) -> &Self {
-        assert_eq!(self.chars().nth(0).unwrap(), ch);
-        &self[1..]
+            .unwrap_or_else(|| {
+                panic!(
+                    "Badly formatted syntax tree; expected a field `{name}` as child of `{}` at {}",
+                    self.kind(),
+                    self.pos(unit)
+                )
+            })
     }
 }
 
 #[derive(Parser, Debug)]
-#[clap(author, version, about, long_about = None)]
-pub struct Args {
+#[clap(author, version, about)]
+pub struct CliArgs {
     #[clap(short, long = "input-file")]
     input: String,
 
     #[clap(short, long = "output-file")]
     output: String,
 
+    #[clap(flatten)]
+    args: Args,
+
+    /// Fuck it. Try emitting URCL despite any errors that may have occurred.
+    #[clap(long)]
+    fuck_it: bool,
+}
+
+#[derive(Parser, Debug)]
+#[clap(author, version, about, long_about = None)]
+pub struct Args {
     /// Parses escape sequences and emits the exact codepoint in the output. This will break some URCL compilers since the URCL code can then contain null bytes and newlines in char literals.
     #[clap(short = 'c', long)]
     emit_chars_literally: bool,
@@ -84,9 +86,13 @@ pub struct Args {
     #[clap(long)]
     garbage_initialized_locals: bool,
 
-    /// Removes predefined instructions. With this parameter, only the following instructions are predefined: const, in, out, jump, branch, halt, call, ret, get, set
-    #[clap(short, long)]
-    minimal: bool,
+    /// Do not import prelude. Only the intrinsic instructions are predefined: const, in, out, jump, branch, halt, call, ret, get, set
+    #[clap(long)]
+    no_prelude: bool,
+
+    /// Do not enforce $main to exist or have a particular signature. Do not call $main at the start
+    #[clap(long)]
+    no_main: bool,
 }
 
 pub struct Headers {
@@ -95,271 +101,422 @@ pub struct Headers {
     minstack: usize,
 }
 
+// fuck this lint
+#[allow(non_upper_case_globals)]
+const prelude_source: &str = include_str!("prelude.ursl");
+
 fn main() -> io::Result<()> {
-    let mut args = Args::parse();
-    if args.emit_chars_as_numbers {
-        args.emit_chars_literally = true;
+    let mut cli = CliArgs::parse();
+    if cli.args.emit_chars_as_numbers {
+        cli.args.emit_chars_literally = true;
     }
-    let source = &fs::read_to_string(&args.input).unwrap();
-    let tree = {
-        let mut parser = tree_sitter::Parser::new();
-        parser
-            .set_language(tree_sitter_ursl::language())
-            .expect("Error loading language data");
-        parser
+    let source = &fs::read_to_string(&cli.input)?;
+
+    let parser = &mut tree_sitter::Parser::new();
+    parser
+        .set_language(tree_sitter_ursl::language())
+        .expect("Failed to set language. For sure unreachable.");
+    let prelude = CompilationUnit::new("<prelude>", prelude_source, parser);
+    let main = CompilationUnit::new(&cli.input, source, parser);
+
+    let headers = parse_headers(
+        main.tree
+            .root_node()
+            .children_by_field_name("headers", &mut main.tree.walk()),
+        &main,
+    );
+
+    let (result, errors) = compile(&cli.args, headers, &[&prelude, &main]);
+
+    if !errors.is_empty() {
+        let max_line_no_width = source.lines().count().to_string().len();
+        let err_count = errors.len();
+        eprintln!();
+        for SourceError { pos, message } in errors {
+            if let Some(pos) = pos {
+                eprintln!("{:>>max_line_no_width$} {pos}", "");
+                if pos.range.start_point.row == pos.range.end_point.row {
+                    let row = pos.range.start_point.row + 1;
+                    let line = source
+                        .lines()
+                        .nth(pos.range.start_point.row)
+                        .expect("Error printing errors");
+                    let start = pos.range.start_point.column;
+                    let end = pos.range.end_point.column;
+                    let err_pointer: String = iter::repeat(' ')
+                        .take(start)
+                        .chain(iter::repeat('^'))
+                        .take(end)
+                        .collect();
+                    eprintln!("{row:>max_line_no_width$} | {line}");
+                    eprintln!("{spc:>max_line_no_width$}   {err_pointer}", spc = ' ');
+                } else {
+                    let lines = source
+                        .lines()
+                        .enumerate()
+                        .skip(pos.range.start_point.row)
+                        .take(pos.range.end_point.row - pos.range.start_point.row);
+                    for (row, line) in lines {
+                        let row = row + 1;
+                        eprintln!("{row:>max_line_no_width$} | {line}");
+                    }
+                }
+                eprintln!("{:<<max_line_no_width$} {message}", "");
+            } else {
+                eprintln!("{message}");
+            }
+            eprintln!();
+        }
+        eprintln!("{err_count} errors");
+        if cli.fuck_it {
+            eprintln!("The partial data that the compiler has will now be emitted as if nothing went wrong.");
+            eprintln!("This will likely panic.");
+            eprintln!("If it does not panic, the output will likely be garbage.");
+            eprintln!("You asked for this. Blame yourself.");
+            eprintln!();
+        } else {
+            eprintln!("Compilation failed.");
+            eprintln!();
+            std::process::exit(1);
+        }
+    }
+
+    let mut output_file = File::create(&cli.output)?;
+    emit(&mut output_file, &cli.args, result)
+}
+
+struct CompileResult<'a> {
+    headers: Headers,
+    defs: Vec<(&'a str, DefValue<'a>)>,
+    functions: BTreeMap<&'a str, Function<'a>>,
+}
+
+pub struct CompilationUnit<'a> {
+    path: &'a str,
+    source: &'a str,
+    tree: Tree,
+}
+
+impl<'a> CompilationUnit<'a> {
+    pub fn new(path: &'a str, source: &'a str, parser: &mut tree_sitter::Parser) -> Self {
+        let tree = parser
             .parse(source, None)
-            .expect("Badly formatted syntax tree")
-    };
-    let tree = tree.root_node();
-    let headers = &parse_headers(tree.field("headers"), source);
-    let cursor = &mut tree.walk();
-    let args = &args;
-    let defs = {
-        let mut defs = Vec::<(&str, DefValue)>::new();
-        for node in tree.children_by_field_name("data", cursor).collect::<Vec<_>>() {
-            let label = node.field("label").text(source).trim1('.');
-            let value_node = node.field("value");
+            .unwrap_or_else(|| panic!("Parsing fucked up real bad in {path}. Didn't even give me a syntax tree. This should be impossible."));
+        CompilationUnit { path, source, tree }
+    }
+}
+
+fn compile<'a>(
+    args: &Args,
+    headers: Headers,
+    units: &[&'a CompilationUnit<'a>],
+) -> (CompileResult<'a>, Vec<SourceError<'a>>) {
+    let mut errors = Vec::new();
+    let mut defs = Vec::<(&str, DefValue)>::new();
+    let mut functions = BTreeMap::new();
+    let mut signatures = HashMap::new();
+    for unit in units {
+        for node in unit
+            .tree
+            .root_node()
+            .children_by_field_name("data", &mut unit.tree.walk())
+        {
+            let label = node.field("label", unit).field("name", unit).text(unit);
+            let value_node = node.field("value", unit);
             let value: DefValue = match value_node.kind() {
                 "array" => DefValue::Array(
                     value_node
-                        .children_by_field_name("items", cursor)
-                        .map(|node| lower_literal(&args, headers, parse_literal(node, &source)))
+                        .children_by_field_name("items", &mut unit.tree.walk())
+                        .map(|node| lower_literal(&args, &headers, parse_literal(node, unit)))
                         .collect(),
                 ),
                 _ => DefValue::Single(lower_literal(
                     args,
-                    headers,
-                    parse_literal(value_node, &source),
+                    &headers,
+                    parse_literal(value_node, unit),
                 )),
             };
             defs.push((label, value));
         }
-        defs
-    };
 
-    if args.verbose {
-        for (label, val) in &defs {
-            println!(".{label} {val}");
+        if args.verbose {
+            for (label, val) in &defs {
+                println!(".{label} {val}");
+            }
         }
+
+        errors.extend(parse_functions(
+            args,
+            &headers,
+            unit.tree
+                .root_node()
+                .children_by_field_name("code", &mut unit.tree.walk()),
+            &mut functions,
+            &mut signatures,
+            unit,
+        ));
     }
 
-    let functions = parse_functions(
-        args,
-        headers,
-        tree.children_by_field_name("code", cursor).collect(),
-        source,
-        cursor,
-    );
-
-    let main_locals = if let Some(main) = functions.get("$main") {
-        assert_eq!(main.stack.input, 0, "$main may not take any arguments");
-        assert_eq!(main.stack.output, 0, "$main may not return any values");
-        if let FunctionBody::Ursl { locals, .. } = main.body {
-            locals
-        } else {
-            panic!("$main is a custom instruction. This should be unreachable.")
+    if args.no_main {
+        // ignore these checks lol
+    } else if let Some(main) = functions.get("$main") {
+        if main.stack.input != 0 {
+            err!(errors; main.unit; main.node.field("stack", main.unit).field("params", main.unit), "$main may not take any arguments");
+        }
+        if main.stack.output != 0 {
+            err!(errors; main.unit; main.node.field("stack", main.unit).field("returns", main.unit), "$main may not return any values");
         }
     } else {
-        panic!("No $main function")
+        err!(errors; None, "No $main function")
     };
+    errors.sort_by(|a, b| {
+        if let Some(ref a) = a.pos {
+            if let Some(ref b) = b.pos {
+                a.range.start_point.row.cmp(&b.range.start_point.row)
+            } else {
+                Ordering::Greater
+            }
+        } else if let Some(_) = b.pos {
+            Ordering::Less
+        } else {
+            Ordering::Equal
+        }
+    });
+    (
+        CompileResult {
+            headers,
+            defs,
+            functions,
+        },
+        errors,
+    )
+}
 
-    let mut f = File::create(&args.output)?;
+fn emit(f: &mut impl Write, args: &Args, result: CompileResult) -> io::Result<()> {
+    writeln!(f, "BITS {}", result.headers.bits)?;
+    writeln!(f, "MINHEAP {}", result.headers.minheap)?;
+    writeln!(f, "MINSTACK {}", result.headers.minstack)?;
 
-    writeln!(f, "BITS {}", headers.bits)?;
-    writeln!(f, "MINHEAP {}", headers.minheap)?;
-    writeln!(f, "MINSTACK {}", headers.minstack)?;
+    let mut max_regs = 0;
 
-    writeln!(f, "PSH ~+2")?;
-    if main_locals != 0 {
-        writeln!(f, "SUB SP SP {main_locals}")?;
+    let mut contents = Vec::new();
+    if !args.no_main {
+        writeln!(contents, "CAL .{}", mangle::function_name("main"))?;
+        writeln!(contents, "HLT")?;
     }
-    writeln!(f, "JMP .{}", mangle::function_name("main"))?;
-    writeln!(f, "HLT")?;
 
-    for (label, val) in defs {
-        writeln!(f, ".{} {val}", mangle::data_label(label))?;
+    for (label, val) in result.defs {
+        writeln!(contents, ".{}\nDW {val}", mangle::data_label(label))?;
     }
 
-    for func in functions.values() {
+    for func in result.functions.values() {
         if let FunctionBody::Ursl {
             locals,
             ref instructions,
         } = func.body
         {
-            ursl::emit_instructions(args, &mut f, &functions, func, locals, instructions)?
+            ursl::emit_instructions(
+                args,
+                &mut contents,
+                &result.functions,
+                func,
+                locals,
+                instructions,
+                &mut max_regs,
+            )?
         }
     }
 
-    Ok(())
+    writeln!(f, "MINREG {max_regs}")?;
+    f.write_all(&contents)
 }
 
-fn parse_headers(node: Node, source: &str) -> Headers {
-    assert_eq!(node.kind(), "headers");
-    Headers {
-        bits: parse_num(node.field("bits").text(source)),
-        minheap: parse_num(node.field("minheap").text(source)),
-        minstack: parse_num(node.field("minstack").text(source)),
+fn parse_headers<'a>(
+    headers: impl Iterator<Item = Node<'a>>,
+    unit: &'a CompilationUnit<'a>,
+) -> Headers {
+    macro_rules! parse_headers {
+        ($($name:ident)*) => {{
+            $(let mut $name = None;)*
+            for header in headers {
+                match header.kind() {
+                    $(stringify!($name) =>
+                        if $name.replace(
+                                header
+                                    .field("value", unit)
+                                    .text(unit)
+                                    .parse()
+                                    .expect(concat!("Invalid value for header `", stringify!($name), "`"))
+                            ).is_some()
+                        {
+                            panic!(concat!("Duplicate header `", stringify!($name), "`"))
+                        }
+                    )*
+                    _ => unknown_node(header, unit),
+                }
+            }
+            $(let $name = $name.expect(concat!("Missing header `", stringify!($name), "`"));)*
+            Headers { $($name,)* }
+        }};
     }
+    parse_headers!(bits minheap minstack)
 }
 
-fn parse_stack_sig(node: Node, source: &str) -> StackBehaviour {
+fn parse_stack_sig(node: Node, unit: &CompilationUnit) -> StackBehaviour {
     match node.child_by_field_name("stack") {
-        Some(node) => parse_stack(node, source),
+        Some(node) => parse_stack(node, unit),
         None => stack!(0; -> 0),
     }
 }
 
-fn parse_stack(node: Node, source: &str) -> StackBehaviour {
+fn parse_stack(node: Node, unit: &CompilationUnit) -> StackBehaviour {
     StackBehaviour {
-        input: parse_num(node.field("params").text(source)),
-        output: parse_num(node.field("returns").text(source)),
+        input: parse_num(node.field("params", unit).text(unit)),
+        output: parse_num(node.field("returns", unit).text(unit)),
     }
 }
 
-fn parse_locals(node: Node, source: &str) -> usize {
+fn parse_locals(node: Node, unit: &CompilationUnit) -> usize {
     match node.child_by_field_name("locals") {
-        Some(node) => parse_num(node.text(source)),
+        Some(node) => parse_num(node.text(unit)),
         None => 0,
-    }
-}
-
-fn parse_label<'a, T: PositionEntry>(
-    inst: Node,
-    labels: &HashMap<&'a str, usize>,
-    instructions: &Vec<T>,
-    func_name: &'a str,
-    source: &'a str,
-) -> Option<&'a str> {
-    match inst.child_by_field_name("label") {
-        Some(node) => {
-            let label = Some(&node.text(source)[1..]); // trim :
-            if let Some(label) = &label {
-                if let Some(idx) = labels.get(label) {
-                    panic!(
-                        "Duplicate label {}:{} at {} and {}",
-                        func_name,
-                        label,
-                        instructions[*idx].pos(),
-                        node.pos()
-                    );
-                }
-            }
-            label
-        }
-        None => None,
     }
 }
 
 fn parse_functions<'a>(
     args: &Args,
     headers: &Headers,
-    funcs: Vec<Node<'a>>,
-    source: &'a str,
-    cursor: &mut TreeCursor<'a>,
-) -> BTreeMap<&'a str, Function<'a>> {
+    funcs: impl Iterator<Item = Node<'a>>,
+    functions: &mut BTreeMap<&'a str, Function<'a>>,
+    signatures: &mut HashMap<&'a str, (StackBehaviour, bool)>,
+    unit: &'a CompilationUnit<'a>,
+) -> Vec<SourceError<'a>> {
+    let mut errors = Vec::new();
     // btreemap ensures deterministic ordering when writing output
-    let mut functions = BTreeMap::<&'a str, Function<'a>>::new();
-    let mut signatures = HashMap::<&'a str, (StackBehaviour, bool)>::new();
     let mut instruction_nodes = HashMap::new();
-
-    if !args.minimal {
-        std_instructions(&mut functions, &mut signatures);
-    }
 
     for node in funcs {
         match node.kind() {
             "func" => {
-                let stack = parse_stack_sig(node, source);
-                let locals = parse_locals(node, source);
-                let name = node.field("name").text(source); // don't trim $, that way it doesn't collide with insts
+                let stack = parse_stack_sig(node, unit);
+                let locals = parse_locals(node, unit);
+                let name = node.field("name", unit).text(unit); // don't trim $, that way it doesn't collide with insts
                 functions.insert(
                     name,
                     Function {
+                        node,
                         name,
                         stack,
                         body: FunctionBody::Ursl {
                             locals,
                             instructions: Vec::new(),
                         },
-                        pos: node.pos(),
+                        pos: node.pos(unit),
+                        unit,
                     },
                 );
                 signatures.insert(name, (stack, false));
                 instruction_nodes.insert(name, node);
             }
             "inst" => {
-                let stack = parse_stack_sig(node, source);
-                let name = node.field("name").text(source);
+                let name = node.field("name", unit).text(unit);
                 if ["halt", "ret"].contains(&name) {
-                    panic!("inst {name} at {} is also defined as intrinsic", node.pos());
+                    err!(errors; unit; node.field("name", unit), "inst {name} is also defined as intrinsic");
                 }
                 if let Some(f) = functions.get(&name) {
-                    panic!("inst {name} at {} is also defined at {}", node.pos(), f.pos);
+                    err!(errors; unit; node, "inst {name} is also defined at {}", f.pos);
                 }
+                let input = urcl::parse_stack_bindings(
+                    node.children_by_field_name("input", &mut unit.tree.walk()),
+                    unit,
+                );
+                let output = urcl::parse_stack_bindings(
+                    node.children_by_field_name("output", &mut unit.tree.walk()),
+                    unit,
+                );
+                let stack = stack!(input.len(); -> output.len());
                 let instructions = urcl::parse_instructions(
                     args,
                     headers,
-                    node.children_by_field_name("instructions", cursor).collect(),
+                    node.field("instructions", unit),
                     name,
                     None,
-                    source,
-                    cursor,
-                );
+                    unit,
+                )
+                .extend_into(&mut errors);
+
                 let branch = node.child_by_field_name("branch").map(|branch_clause| {
-                    urcl::parse_instructions(
+                    let input = urcl::parse_stack_bindings(
+                        branch_clause.children_by_field_name("input", &mut unit.tree.walk()),
+                        unit,
+                    );
+                    let instructions = urcl::parse_instructions(
                         args,
                         headers,
-                        branch_clause.children_by_field_name("instructions", cursor).collect(),
+                        branch_clause.field("instructions", unit),
                         name,
-                        Some(&branch_clause.field("label").text(source)[1..]), // trim :
-                        source,
-                        cursor,
+                        Some(
+                            &branch_clause
+                                .field("label", unit)
+                                .field("name", unit)
+                                .text(unit),
+                        ),
+                        unit,
                     )
+                    .extend_into(&mut errors);
+                    UrclBranchBody {
+                        input,
+                        instructions,
+                    }
                 });
                 let is_branch = branch.is_some();
                 if is_branch && stack.output != 1 {
-                    panic!(
-                        "inst {name} has a branching variant, but does not return 1 value! at {}",
-                        node.pos()
-                    )
+                    err!(errors; unit; node, "inst {name} has a branching variant, but does not return 1 value.")
                 }
                 functions.insert(
                     name,
                     Function {
+                        node,
                         name,
                         stack,
                         body: FunctionBody::Urcl {
+                            input,
+                            output,
                             instructions,
                             branch,
                         },
-                        pos: node.pos(),
+                        pos: node.pos(unit),
+                        unit,
                     },
                 );
                 signatures.insert(name, (stack, is_branch));
             }
             "inst_permutation" => {
-                let name = node.field("name").text(source);
-                let perm = parse_permutation_sig(node.field("permutation"), source, cursor);
-                let instructions = compile_permutation(&perm, node.pos());
+                let name = node.field("name", unit).text(unit);
+                if let Some(f) = functions.get(&name) {
+                    panic!(
+                        "inst {name} at {} is also defined at {}",
+                        node.pos(unit),
+                        f.pos
+                    );
+                }
+                let perm = parse_permutation_sig(node.field("permutation", unit), unit)
+                    .extend_into(&mut errors);
                 let stack = stack!(perm.input; -> perm.output.len());
                 functions.insert(
                     name,
                     Function {
+                        node,
                         name,
                         stack,
-                        body: FunctionBody::Urcl {
-                            instructions,
-                            branch: None,
-                        },
-                        pos: node.pos(),
+                        body: FunctionBody::Permutation(perm),
+                        pos: node.pos(unit),
+                        unit,
                     },
                 );
                 signatures.insert(name, (stack, false));
             }
-            _ => panic!(
-                "Unknown node kind, expected func or inline. Error at {}",
-                node.pos()
-            ),
+            _ => unknown_node(node, unit),
         }
     }
 
@@ -371,24 +528,21 @@ fn parse_functions<'a>(
             } => {
                 let locals = *locals;
                 let node = instruction_nodes.remove(func.name).unwrap();
-                ursl::parse_instructions(
+                errors.extend(ursl::parse_instructions(
                     args,
                     headers,
                     &signatures,
-                    node.children_by_field_name("instructions", cursor).collect(),
+                    node.children_by_field_name("instructions", &mut unit.tree.walk())
+                        .collect(),
                     func.name,
                     func.stack.input + locals,
                     func.stack.output,
                     instructions,
-                    source,
-                    cursor,
-                );
+                    unit,
+                ));
                 if args.verbose {
                     println!("func {} : {} + {locals} {{", func.name, func.stack);
                     for entry in instructions {
-                        if let Some(label) = &entry.label {
-                            println!(" :{label}")
-                        }
                         println!("  {}", entry.instruction);
                         match entry.instruction {
                             ursl::Instruction::Ret
@@ -402,172 +556,39 @@ fn parse_functions<'a>(
                 }
             }
             FunctionBody::Urcl {
+                input,
+                output,
                 instructions,
                 branch,
             } => {
                 if args.verbose {
-                    println!("inst {} : {} {{", func.name, func.stack);
+                    print!("inst {}{input}", func.name);
+                    if output.len() != 0 {
+                        print!(" ->{output}");
+                    }
+                    println!(" {{");
                     for entry in instructions {
                         println!("  {}", entry.instruction)
                     }
-                    if let Some(branch) = branch {
-                        println!("}} branch {{");
-                        for entry in branch {
+                    if let Some(UrclBranchBody {
+                        input,
+                        instructions,
+                    }) = branch
+                    {
+                        println!("}} branch{input} {{");
+                        for entry in instructions {
                             println!("  {}", entry.instruction)
                         }
                     }
                     println!("}}")
                 }
             }
+            FunctionBody::Permutation(perm) => {
+                if args.verbose {
+                    println!("inst {} {perm}", func.name);
+                }
+            }
         }
     }
-    functions
-}
-
-fn std_instructions<'a>(
-    funcs: &mut BTreeMap<&'a str, Function<'a>>,
-    sigs: &mut HashMap<&'a str, (StackBehaviour, bool)>,
-) {
-    // i spent WAY TOO FUCKING LONG on making this macro
-    macro_rules! inst {
-        ($name:ident $in:literal -> $out:literal { $($i:tt)* } $(branch { $($b:tt)* })?) => {{
-            let (is_branch, branch) = inst!(br $($($b)*)?);
-            let f = Function {
-                name: stringify!($name),
-                stack: stack!($in; -> $out),
-                body: FunctionBody::Urcl {
-                    instructions: inst!(e $($i)*),
-                    branch,
-                },
-                pos: Default::default(),
-            };
-            sigs.insert(f.name, (f.stack, is_branch));
-            funcs.insert(f.name, f);
-        }};
-        ($name:ident [$($in:ident)*] -> [$($out:ident)*]) => {{
-            let mut names = HashMap::new();
-            for (i, name) in <[&str]>::iter(&[$(stringify!($in),)*]).enumerate() {
-                names.insert(name, i);
-            }
-            let p = Permutation {
-                input: names.len(),
-                output: vec![$(names[&stringify!($out)],)*],
-            };
-            let f = Function {
-                name: stringify!($name),
-                stack: stack!(p.input; -> p.output.len()),
-                body: FunctionBody::Urcl {
-                    instructions: compile_permutation(&p, Default::default()),
-                    branch: None,
-                },
-                pos: Default::default(),
-            };
-            sigs.insert(f.name, (f.stack, false));
-            funcs.insert(f.name, f);
-        }};
-        (i $inst:ident :dest $($s:tt)*) => {
-            inst!(p { $inst (urcl::Destination::Branch(urcl::BranchDestination::BranchLabel)) } $($s)*)
-        };
-        (i $inst:ident R($r:literal) $($s:tt)*) => {
-            inst!(p { $inst (urcl::Destination::Register($r)) } $($s)*)
-        };
-        (s ($($t:tt)*) R($s:literal) $($r:tt)*) => {
-            inst!(p { $($t)* (urcl::Source::Register($s)) } $($r)*)
-        };
-        (s ($($t:tt)*) $s:literal $($r:tt)*) => {
-            inst!(p { $($t)* (urcl::Source::Literal(Literal::Num($s))) } $($r)*)
-        };
-        (s ($($t:tt)*) @$s:ident $($r:tt)*) => {
-            inst!(p { $($t)* (urcl::Source::Literal(Literal::Macro(stringify!($s)))) } $($r)*)
-        };
-        (d $inst:ident ($dest:expr) ($s1:expr) ($s2:expr)) => {
-            urcl::Instruction::Binary {
-                op: stringify!($inst),
-                dest: $dest,
-                source1: $s1,
-                source2: $s2,
-            }
-        };
-        (d $inst:ident ($dest:expr) ($s:expr)) => {
-            urcl::Instruction::Unary {
-                op: stringify!($inst),
-                dest: $dest,
-                source: $s,
-            }
-        };
-        (p { $inst:ident $(($s:expr))+ } $($t:tt)+) => {
-            inst!(s ($inst $(($s))+) $($t)+)
-        };
-        (p { $inst:ident $(($s:expr))+ }) => {
-            inst!(d $inst $(($s))+)
-        };
-        (e) => { vec![] };
-        (e $($i:tt)+) => {
-            vec![
-                urcl::InstructionEntry {
-                    instruction: inst!(i $($i)*),
-                    pos: Default::default(),
-                }
-            ]
-        };
-        (br) => { (false, None) };
-        (br $($i:tt)+ ) => { (true, Some(inst!(e $($i)+))) };
-    }
-
-    inst!(dup [a] -> [a a]);
-    // pop is a compile-time operation that only modifies stack height, as anything in unused regs are just garbage
-    inst! { pop [a] -> [] }
-    // nop doesn't need to map to NOP, since URCL is apparently supposed to support multiple labels per instruction [citation needed]
-    inst! { nop [] -> [] }
-
-    inst! { load 1 -> 1 { LOD R(1) R(1) } }
-    inst! { store 2 -> 0 { STR R(1) R(2) } }
-    inst! { copy 2 -> 0 { CPY R(1) R(2) } }
-
-    inst! { bool 1 -> 1 { SETNZ R(1) R(1) } branch { BNZ :dest R(1) } }
-    inst! { not 1 -> 1 { NOT R(1) R(1) } branch { BNE :dest R(1) @MAX } }
-
-    inst! { xor 2 -> 1 { XOR R(1) R(1) R(2) } }
-    inst! { xnor 2 -> 1 { XNOR R(1) R(1) R(2) } }
-
-    inst! { and 2 -> 1 { AND R(1) R(1) R(2) } }
-    inst! { nand 2 -> 1 { NAND R(1) R(1) R(2) } }
-
-    inst! { or 2 -> 1 { OR R(1) R(1) R(2) } }
-    inst! { nor 2 -> 1 { NOR R(1) R(1) R(2) } }
-
-    inst! { add 2 -> 1 { ADD R(1) R(1) R(2) } }
-    inst! { sub 2 -> 1 { SUB R(1) R(1) R(2) } }
-
-    inst! { inc 1 -> 1 { INC R(1) R(1) } }
-    inst! { dec 1 -> 1 { DEC R(1) R(1) } }
-
-    inst! { carry 2 -> 1 { SETC R(1) R(1) R(2) } branch { BRC :dest R(1) R(2) } }
-    inst! { neg 1 -> 1 { NEG R(1) R(1) } }
-
-    inst! { mult 2 -> 1 { MLT R(1) R(1) R(2) } }
-    inst! { sdiv 2 -> 1 { SDIV R(1) R(1) R(2) } }
-    inst! { div 2 -> 1 { DIV R(1) R(1) R(2) } }
-    inst! { mod 2 -> 1 { MOD R(1) R(1) R(2) } }
-
-    inst! { rsh 1 -> 1 { RSH R(1) R(1) } }
-    inst! { ash 1 -> 1 { SRS R(1) R(1) } }
-    inst! { lsh 1 -> 1 { LSH R(1) R(1) } }
-
-    inst! { brsh 2 -> 1 { BSR R(1) R(1) R(2) } }
-    inst! { bash 2 -> 1 { BSS R(1) R(1) R(2) } }
-    inst! { blsh 2 -> 1 { BSL R(1) R(1) R(2) } }
-
-    inst! { eq 2 -> 1 { SETE R(1) R(1) R(2) } branch { BRE :dest R(1) R(2) } }
-    inst! { ne 2 -> 1 { SETNE R(1) R(1) R(2) } branch { BNE :dest R(1) R(2) } }
-
-    inst! { sgt 2 -> 1 { SSETG R(1) R(1) R(2) } branch { SBRG :dest R(1) R(2) } }
-    inst! { sgte 2 -> 1 { SSETGE R(1) R(1) R(2) } branch { SBGE :dest R(1) R(2) } }
-    inst! { slt 2 -> 1 { SSETL R(1) R(1) R(2) } branch { SBRL :dest R(1) R(2) } }
-    inst! { slte 2 -> 1 { SSETLE R(1) R(1) R(2) } branch { SBLE :dest R(1) R(2) } }
-
-    inst! { gt 2 -> 1 { SETG R(1) R(1) R(2) } branch { BRG :dest R(1) R(2) } }
-    inst! { gte 2 -> 1 { SETGE R(1) R(1) R(2) } branch { BGE :dest R(1) R(2) } }
-    inst! { lt 2 -> 1 { SETL R(1) R(1) R(2) } branch { BRL :dest R(1) R(2) } }
-    inst! { lte 2 -> 1 { SETLE R(1) R(1) R(2) } branch { BLE :dest R(1) R(2) } }
+    errors
 }

@@ -1,0 +1,61 @@
+inst nop [] -> []
+inst pop [a] -> []
+inst dup [a] -> [a a]
+inst swap [a b] -> [b a]
+inst over [a b] -> [a b a]
+
+inst load &a -> &a { LOD &a &a }
+inst store <out> <src> { STR <out> <src> }
+inst copy <out> <src> { CPY <out> <src> }
+
+inst bool &a -> &a { SETNZ &a &a } branch <src> -> :dest { BNZ :dest <src> }
+// this is comparing to @MAX because it's bitwise NOT, and not logical NOT
+// for logical NOT, that would be bool; not, which *is* equivalent for the trivial 0 or @MAX case
+inst not &a -> &a { NOT &a &a } branch <src> -> :dest { BNE :dest <src> @MAX }
+
+inst xor &a <b> -> &a { XOR &a &a <b> }
+inst xnor &a <b> -> &a { XNOR &a &a <b> }
+
+inst and &a <b> -> &a { AND &a &a <b> }
+inst nand &a <b> -> &a { NAND &a &a <b> }
+
+inst or &a <b> -> &a { OR &a &a <b> }
+inst nor &a <b> -> &a { NOR &a &a <b> }
+
+// add, sub
+inst add &a <b> -> &a { ADD &a &a <b> }
+inst sub &a <b> -> &a { SUB &a &a <b> }
+
+// inc, dec
+inst inc &a -> &a { INC &a &a }
+inst dec &a -> &a { DEC &a &a }
+
+inst carry &a <b> -> &a { SETC &a &a <b> } branch <a> <b> -> :dest { BRC :dest <a> <b> }
+inst neg &a -> &a { NEG &a &a }
+
+inst mult &a <b> -> &a { MLT &a &a <b> }
+inst div &a <b> -> &a { DIV &a &a <b> }
+inst sdiv &a <b> -> &a { SDIV &a &a <b> }
+inst mod &a <b> -> &a { MOD &a &a <b> }
+inst smod &a <b> -> &a { SMOD &a &a <b> }
+
+inst rsh &a -> &a { RSH &a &a }
+inst ash &a -> &a { SRS &a &a }
+inst lsh &a -> &a { LSH &a &a }
+
+inst brsh &a <b> -> &a { BSR &a &a <b> }
+inst bash &a <b> -> &a { BSS &a &a <b> }
+inst blsh &a <b> -> &a { BSL &a &a <b> }
+
+inst eq &a <b> -> &a { SETE &a &a <b> } branch <a> <b> -> :dest { BRE :dest <a> <b> }
+inst ne &a <b> -> &a { SETNE &a &a <b> } branch <a> <b> -> :dest { BNE :dest <a> <b> }
+
+inst sgt &a <b> -> &a { SSETG &a &a <b> } branch <a> <b> -> :dest { SBRG :dest <a> <b> }
+inst sgte &a <b> -> &a { SSETGE &a &a <b> } branch <a> <b> -> :dest { SBGE :dest <a> <b> }
+inst slt &a <b> -> &a { SSETL &a &a <b> } branch <a> <b> -> :dest { SBRL :dest <a> <b> }
+inst slte &a <b> -> &a { SSETLE &a &a <b> } branch <a> <b> -> :dest { SBLE :dest <a> <b> }
+
+inst gt &a <b> -> &a { SETG &a &a <b> } branch <a> <b> -> :dest { BRG :dest <a> <b> }
+inst gte &a <b> -> &a { SETGE &a &a <b> } branch <a> <b> -> :dest { BGE :dest <a> <b> }
+inst lt &a <b> -> &a { SETL &a &a <b> } branch <a> <b> -> :dest { BRL :dest <a> <b> }
+inst lte &a <b> -> &a { SETLE &a &a <b> } branch <a> <b> -> :dest { BLE :dest <a> <b> }

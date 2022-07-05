@@ -6,9 +6,9 @@ minheap 0
 .escape '\n'
 .num 0x20
 .nums [ 1 2 3 4 /* ... */ @MAX ]
-.vtable_or_something [ $func_fib ]
+.vtable_or_something [ $fib ]
 
-inst swap [a b] -> [b a]
+// inst swap [a b] -> [b a]
 
 func $main {
     const 20
@@ -29,6 +29,6 @@ func $fib 1 -> 1 {
     ret
 
     height 1
-    :base_case
+    label :base_case
     ret
 }

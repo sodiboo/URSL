@@ -31,7 +31,7 @@ All headers must be specified at the beginning of a program and have no defaults
 
 # Predefined data
 
-At the start of the file, there can be predefined data to keep in RAM. All data definitions must be labeled with a data label (``.name``), which is followed by a literal which is just the same as the ``DW`` operand in URCL (char, number, or array of either), and compiles directly to that instruction. Newlines are technically not signficant in URSL, at least not any more than other whitespace (carefully done to create a simpler grammar) which means that you're free to format arrays however you think makes sense. All definitions are outputted as ``DW``s in the same order, but i really don't recommend you try to do any arithmetic on the pointers to them, and there is no guarantee of what happens if you do so. An exception to this is obviously arrays, whose behaviour is well defined until the end of the array.
+At the start of the file, there can be predefined data to keep in RAM. All data definitions must be labeled with a data label (``.name``), which is followed by a literal which is just the same as the ``DW`` operand in URCL (char, number, or array of either), and compiles directly to that instruction. Newlines are technically not signficant in URSL, at least not any more than other whitespace (carefully done to create a simpler grammar) which means that you're free to format arrays however you think makes sense. All definitions are outputted as ``DW``s in the same order, but i really don't recommend you try to do any arithmetic on the pointers to them, and there is no guarantee of what happens if you do so. An exception to this is obviously arrays, whose behaviour is well defined until the end of the array. If you know you can rely on cross-DW values (i.e. out of bounds array indices) on your target platform, you can safely rely on them in URSL too.
 
 ``RUN RAM``/``ROM`` is not distinguished in URSL. Depending on the behaviour of the target ISA, either one of these may be fit. URSL expects ``DW``s to be writable (i.e. it always allows writing to a data label, but obviously that won't happen unless your code actually writes to a data label), but URSL output will never try to read or write from an instruction label, or jump to any value that isn't an immediate label. URSL respects that instructions may be stored in addressable memory, and does not require ``#0`` to be a specific value it can figure out just by the data definitions. Any pointers that are outside the heap (less than ``#0``) are undefined behaviour in URSL, unless they're made from data labels, or from the ``ref`` instruction (given that stack frame still exists)
 
@@ -201,7 +201,7 @@ inst eq 2 -> 1 {
 }
 ```
 
-The branch block is used when a custom instruction is used like ``eq branch :somewhere``. In this case, if there is a ``branch`` block, it will not use the main translation. These are translated together and only emits the contents of the branch block. In a branch block, return values are completely ignored, and it is called as if there are zero return values. The main special thing about branch blocks that makes them work is that they take an additional label parameter, which is the label in the ``branch`` instruction. Branch supporting instructions only return 1 value that should always be ``0`` or ``@MAX``, but the value is not enforced. However, the stack height *is* enforced.
+The branch block is used when a custom instruction is used like ``eq branch :somewhere``. In this case, if there is a ``branch`` block, it will not use the main translation. These are translated together and only emits the contents of the branch block. In a branch block, return values are completely ignored, and it is called as if there are zero return values. The main special thing about branch blocks that makes them work is that they take an additional label parameter, which is the label in the ``branch`` instruction. Branch supporting instructions only return 1 value that should always be ``0`` or ``@MAX``, but the value is not enforced. However, the stack height *is* enforced. When using a branch block, **please make sure it is 100% equivalent to the main block followed by ``BNZ``** and do NOT overload an instruction with different behaviour when branching on it. This is why the ``not`` instruction's branch variant is ``BNE @MAX`` instead of ``BZ``
 
 Now, the only thing remaining to be covered about these is the calling convention. Custom instructions are inlined, and as such their parameters already exist in the registers. ``$0`` is always translated to the zero register, but ``$1`` is translated as the "excess height" plus one. The "excess height" is the number of additional stack entries (i.e. occupied registers), so ``$1`` refers to the first parameter to the function. If you have a function like ``urcl add 2 -> 1``, the two terms of the addition will be in ``$1`` and ``$2``. Reading registers higher than the amount of arguments may contain garbage data, as they are not cleared when they become unused. Since they are unused, you may write to them as temporary registers for whatever work you need to do within. The return values of a ``urcl`` function are also stored in the lower registers. Since ``add`` returns 1, the return value is stored in ``$1`` and ``$2`` is free to store whatever temporary garbage you need while working on the ``add`` operation. A reasonable implementation of the ``add`` function may be like so:
 
@@ -215,7 +215,9 @@ urcl add 2 -> 1 {
 
 "Custom permutations" are custom instructions that are declared using a permutation only, instead of URCL code. This allows you to give name to commonly used permutations, like ``nop``, ``dup``, ``pop``, etc
 
-Their syntax is just ``inst name [a b c] -> [a b c]`` where ``[a b c]`` is just any number of identifiers that are delimited by square brackets, and ``name`` is the instruction name. See [perm](#perm-a-b-c---c-b-a)
+Their syntax is just ``inst name [a b c] -> [a b c]`` where ``[a b c]`` is just any number of identifiers that are delimited by square brackets, and ``name`` is the instruction name. See [perm](#perm-a-b-c---c-a-b)
+
+If you frequently use the same permutation, then a custom permutation declaration is usually more readable, and may also speed up compilation times (as their translations are cached when defined, but anonymous ``perm``s are compiled individually), but other than that it should behave identically to the anonymous permutation
 
 # Instructions
 
@@ -352,20 +354,46 @@ This conditionally branches to the label in the immediate operand. Unlike other 
 
 The following instructions are not actually part of the core of the language, but are automatically inserted by the compiler prior to actually parsing your functions. You can turn this off with the ``--minimal`` parameter.
 
+## ``nop`` 0 -> 0
+
+Does nothing. Equivalent to ``perm [] -> []``
+
+```arm
+NOP
+```
+
+## ``pop`` 1 -> 0
+
+This will pop the top value off the stack, and discard it. In actual emitted output, this is a nop, since all it does is just decrease the (compile time) stack height and leave garbage in the next entry. However, this translation best captures the intent of what the instruction actually does. Equivalent to ``perm [a] -> []``
+
+```arm
+MOV $0 $1
+```
+
 ## ``dup`` 1 -> 2
 
-This will copy the value on top of the stack, such that it appears twice.
+This will copy the value on top of the stack, such that it appears twice. Equivalent to ``perm [a] -> [a a]``
 
 ```arm
 MOV $2 $1
 ```
 
-## ``pop`` 1 -> 0
+## ``swap`` 2 -> 2
 
-This will pop the top value off the stack, and discard it. In actual emitted output, this is a nop, since all it does is just decrease the (compile time) stack height and leave garbage in the next entry. However, this translation best captures the intent of what the instruction actually does.
+Swaps the top 2 values on the stack. Equivalent to ``perm [a b] -> [b a]``
 
 ```arm
-MOV $0 $1
+MOV $3 $1
+MOV $1 $2
+MOV $2 $3
+```
+
+## ``over`` 2 -> 3
+
+Copies the value *just below* the top of the stack and puts it over the top. Equivalent to ``perm [a b] -> [a b a]``
+
+```arm
+MOV $3 $1
 ```
 
 ## ``load`` 1 -> 1

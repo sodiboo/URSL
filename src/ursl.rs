@@ -2,27 +2,30 @@ use super::*;
 use std::fmt::{Display, Formatter, Result};
 
 pub struct InstructionEntry<'a> {
-    pub label: Option<&'a str>,
     pub excess_height: usize,
     pub enter_height: usize,
     pub exit_height: Option<usize>,
     pub instruction: Instruction<'a>,
-    pub pos: Position,
+    pub unit: &'a CompilationUnit<'a>,
+    pub node: Node<'a>,
 }
 
 impl PositionEntry for InstructionEntry<'_> {
-    fn pos(&self) -> &Position {
-        &self.pos
+    fn pos(&self) -> Position {
+        self.node.pos(self.unit)
     }
 }
 
 pub enum Instruction<'a> {
+    Height(usize),
+
     Perm(Permutation),
     Const(Literal<'a>),
 
     In(&'a str),
     Out(&'a str),
 
+    Label(&'a str),
     Jump(&'a str),
     Branch(&'a str, &'a str),
 
@@ -40,12 +43,14 @@ pub enum Instruction<'a> {
 impl Display for Instruction<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         match self {
+            Self::Height(height) => write!(f, "height {height}"),
             Self::Perm(perm) => write!(f, "perm {perm}"),
             Self::Const(lit) => write!(f, "const {lit}"),
 
             Self::In(port) => write!(f, "in %{port}"),
             Self::Out(port) => write!(f, "out %{port}"),
 
+            Self::Label(label) => write!(f, "label :{label}"),
             Self::Jump(dest) => write!(f, "jump :{dest}"),
             Self::Branch(condition, dest) => write!(f, "{condition} branch :{dest}"),
 
@@ -71,55 +76,64 @@ pub fn parse_instructions<'a>(
     locals: usize,
     returns: usize,
     instructions: &mut Vec<InstructionEntry<'a>>,
-    source: &'a str,
-    cursor: &mut TreeCursor<'a>,
-) {
+    unit: &'a CompilationUnit<'a>,
+) -> Vec<SourceError<'a>> {
+    let mut errors = Vec::new();
     let mut height = Some(0usize);
-    let mut labels = HashMap::<&'a str, usize>::new();
-    // skips {
+    let mut all_labels = HashMap::<&'a str, usize>::new();
     for inst in nodes {
-        let label = parse_label(inst, &labels, &instructions, func_name, source);
-
+        // if args.verbose {
+        //     println!();
+        //     println!("-- parse so far for {func_name}");
+        //     for entry in instructions.iter() {
+        //         println!("    {}", entry.instruction);
+        //     }
+        //     if let Some(height) = height {
+        //         println!("height = {height}");
+        //     } else {
+        //         println!("height = ???");
+        //     }
+        // }
         macro_rules! op {
             () => {
-                inst.field("operand")
+                inst.field("operand", unit)
             };
             (stack) => {
-                parse_stack(op!(), source)
+                parse_stack(op!(), unit)
             };
             (num) => {
-                parse_num(op!().text(source))
+                parse_num(op!().text(unit))
             };
             (literal) => {
-                lower_literal(args, headers, parse_literal(op!(), source))
+                lower_literal(args, headers, parse_literal(op!(), unit))
             };
             (func) => {
-                op!().text(source)
+                op!().text(unit)
             };
             (label) => {
-                &op!().text(source)[1..] // trim :
+                op!().field("name", unit).text(unit)
             };
             (port) => {
-                &op!().text(source)[1..] // trim %
+                op!().field("name", unit).text(unit)
             };
             (loc) => {{
                 let idx = op!(num);
                 assert!(
                     idx < locals,
                     "Out of bounds local variable at {}",
-                    inst.pos()
+                    inst.pos(unit)
                 );
                 idx
             }};
             (perm) => {
-                parse_permutation_sig(op!(), source, cursor)
+                parse_permutation_sig(op!(), unit).extend_into(&mut errors)
             };
         }
 
         macro_rules! inst {
             ($height:ident => $e:expr) => {
                 {
-                    let $height = height.unwrap_or_else(|| panic!("Unknown stack height at {}", inst.pos()));
+                    let $height = height.unwrap_or_else(|| panic!("Unknown stack height at {}", inst.pos(unit)));
                     $e
                 }
             };
@@ -127,35 +141,39 @@ pub fn parse_instructions<'a>(
             ($inst:expr; $in:literal -> $out:literal) => { inst!($inst; stack!($in; -> $out)) };
             ($inst:expr; $stack:expr) => {
                 inst!(enter_height => {
-                    let excess_height = enter_height.checked_sub($stack.input).unwrap_or_else(|| panic!("Stack underflow at {}", inst.pos()));
+                    let excess_height = match enter_height.checked_sub($stack.input) {
+                        Some(height) => height,
+                        None => {
+                            err!(errors; unit; inst; 0, "Stack underflow")
+                        }
+                    };
                     InstructionEntry {
-                        label,
                         excess_height,
                         enter_height,
                         exit_height: Some(excess_height + $stack.output),
                         instruction: $inst,
-                        pos: inst.pos(),
+                        node: inst,
+                        unit,
                     }
                 })
             }
         }
         let entry = match inst.kind() {
             "height" => {
-                assert_eq!(label, None, "Height directive cannot be labeled at {}. Did you mean to put the label *after* it?", inst.pos());
                 let operand = op!(num);
-                height = match height {
-                    Some(height) => {
-                        assert_eq!(
-                            height,
-                            operand,
-                            "Height directive at {} doesn't match the correct stack height",
-                            inst.pos()
-                        );
-                        Some(height)
+                if let Some(height) = height {
+                    if height != operand {
+                        err!(errors; unit; inst, "Height directive doesn't match the correct stack height (stack here has height of {height})");
                     }
-                    None => Some(operand),
-                };
-                continue;
+                }
+                InstructionEntry {
+                    excess_height: 0,
+                    enter_height: operand,
+                    exit_height: Some(operand),
+                    instruction: Instruction::Height(operand),
+                    node: inst,
+                    unit,
+                }
             }
             "perm" => {
                 let operand = op!(perm);
@@ -164,9 +182,12 @@ pub fn parse_instructions<'a>(
             "const" => inst!(Instruction::Const(op!(literal)); 0 -> 1),
             "call" => {
                 let operand = op!(func);
-                let (stack, _) = signatures.get(operand).unwrap_or_else(|| {
-                    panic!("Call to unknown func {} at {}", operand, inst.pos())
-                });
+                let stack = match signatures.get(operand) {
+                    Some((stack, _)) => *stack,
+                    None => {
+                        err!(errors; unit; inst; stack!(0; -> 0), "Call to unknown func {operand}")
+                    }
+                };
                 inst!(Instruction::Call(operand); stack)
             }
             "icall" => {
@@ -179,102 +200,106 @@ pub fn parse_instructions<'a>(
 
             "in" => inst!(Instruction::In(op!(port)); 0 -> 1),
             "out" => inst!(Instruction::Out(op!(port)); 1 -> 0),
+            "label" => inst!(Instruction::Label({
+                let label = op!(label);
+                all_labels.insert(label, instructions.len());
+                label
+            }); 0 -> 0),
             "jump" => inst!(enter_height => InstructionEntry {
-                label,
                 excess_height: enter_height,
                 enter_height,
                 exit_height: None,
                 instruction: Instruction::Jump(op!(label)),
-                pos: inst.pos(),
+                node: inst,
+                unit,
             }),
             "branch" => inst! { enter_height => {
-                let opcode = inst.field("opcode").text(source);
-                if let Some((stack, branching)) = signatures.get(opcode) {
-                    if !branching {
-                        panic!("Branch following instruction without a branching variant at {}", inst.pos());
-                    }
-                    assert_eq!(stack.output, 1);
-                    let excess_height = enter_height.checked_sub(stack.input).unwrap_or_else(|| panic!("Stack underflow at {}", inst.pos()));
-                    InstructionEntry {
-                        label,
+                let previous = instructions.pop().unwrap_or_else(|| {
+                    err!(errors; unit; inst; InstructionEntry {
+                        excess_height: enter_height,
                         enter_height,
-                        excess_height,
-                        exit_height: Some(excess_height),
-                        instruction: Instruction::Branch(opcode, op!(label)),
-                        pos: inst.pos(),
-                    }
+                        exit_height: Some(enter_height),
+                        instruction: Instruction::Call(""),
+                        node: inst,
+                        unit,
+                    }, "Branch without a prefix instruction")
+                });
+                let opcode = if let Instruction::Call(opcode) = previous.instruction {
+                    opcode
                 } else {
-                    panic!("Branch with undefined instruction at {}", inst.pos())
+                    err!(errors; unit; inst; "", "Branch prefix has no branching variant")
+                };
+                // unwrap should only exist in the above error cases
+                // otherwise, it has already been proven to exist by the actual call implementation
+                let (stack, branching) = signatures.get(opcode).unwrap_or(&(stack!(0; -> 1), true));
+                if !branching {
+                    err!(errors; unit; inst, "Branch prefix has no branching variant");
+                }
+                assert_eq!(stack.output, 1);
+                InstructionEntry {
+                    enter_height: previous.enter_height,
+                    excess_height: previous.excess_height,
+                    exit_height: Some(previous.excess_height),
+                    instruction: Instruction::Branch(opcode, op!(label)),
+                    node: inst,
+                    unit,
                 }
             }},
             "ret" => inst!(enter_height => {
-                assert_eq!(enter_height, returns, "Bad stack height (returns {enter_height}, but should return {returns})");
+                if enter_height != returns {
+                    err!(errors; unit; inst, "Bad stack height (height here is {enter_height}, but function returns {returns})");
+                }
                 InstructionEntry {
-                    label,
                     excess_height: 0,
                     enter_height,
                     exit_height: None,
                     instruction: Instruction::Ret,
-                    pos: inst.pos(),
+                    node: inst,
+                    unit,
                 }
             }),
             "halt" => inst!(enter_height => InstructionEntry {
-                    label,
                     excess_height: enter_height,
                     enter_height,
                     exit_height: None,
                     instruction: Instruction::Halt,
-                    pos: inst.pos(),
+                    node: inst,
+                    unit,
             }),
             "custom_instruction" => {
-                let opcode = inst.field("opcode").text(source);
+                let opcode = inst.field("opcode", unit).text(unit);
                 let (stack, _) = signatures
                     .get(opcode)
                     .unwrap_or_else(|| panic!("Unknown instruction {}", opcode));
                 inst!(Instruction::Call(opcode); stack)
             }
-            // Unknown *node kind*
-            unknown => panic!(
-                "Invalid node type `{}` (expected some kind of instruction)",
-                unknown
-            ),
+            _ => unknown_node(inst, unit),
         };
-        if let Some(label) = label {
-            labels.insert(label, instructions.len());
-        }
         height = entry.exit_height;
         instructions.push(entry);
     }
     for entry in instructions.iter() {
         if let Instruction::Jump(label) | Instruction::Branch(_, label) = entry.instruction {
-            let dest = &instructions[*labels.get(label).unwrap_or_else(|| {
-                panic!("Branch or jump to unknown label {}:{}", func_name, label)
-            })];
-            assert_eq!(
-                entry.excess_height, dest.enter_height,
-                "Incorrect stack height on branch (got {} but destination has {})",
-                entry.excess_height, dest.enter_height,
-            );
+            if let Some(&idx) = all_labels.get(label) {
+                let dest = &instructions[idx];
+                if entry.excess_height != dest.enter_height {
+                    err!(errors; unit; entry.node, "Incorrect stack height on branch (height here is {} but destination expects {})", entry.excess_height, dest.enter_height);
+                }
+            } else {
+                err!(errors; unit; entry.node, "Branch or jump to unknown label {func_name}:{label}")
+            }
         }
     }
     if returns == 0 {
         if let Some(height) = height {
-            assert_eq!(
-                height, 0,
-                "Stack is not empty at the end of {func_name} (height is {height})",
-            );
-            instructions.push(InstructionEntry {
-                label: None,
-                excess_height: 0,
-                enter_height: 0,
-                exit_height: None,
-                instruction: Instruction::Ret,
-                pos: Default::default(),
-            });
+            if height != 0 {
+                err!(errors; None, "Stack is not empty at the end of {func_name} (height is {height})");
+            }
         }
     } else if height.is_some() {
-        panic!("func {func_name} falls out of its scope without returning, jumping or halting.",);
+        err!(errors; None, "func {func_name} falls out of its scope without returning, jumping or halting.");
     }
+    errors
 }
 
 pub fn emit_instructions<'a>(
@@ -284,10 +309,10 @@ pub fn emit_instructions<'a>(
     func: &Function<'a>,
     locals: usize,
     instructions: &Vec<InstructionEntry<'a>>,
+    max_regs: &mut usize,
 ) -> io::Result<()> {
     assert!(!instructions.is_empty()); // empty instruction lists are only allowed for -> 0, and parsing normalizes them to end with a ret
-    let name = func.name.trim1('$');
-    writeln!(f, ".{}", mangle::function_name(name))?;
+    writeln!(f, ".{}", mangle::function_name(func.name))?;
     if args.garbage_initialized_locals {
         if func.stack.input != 0 {
             writeln!(f, "SUB SP SP {locals}")?;
@@ -306,13 +331,14 @@ pub fn emit_instructions<'a>(
         // however, the actual output still needs to bend around the new memory layout
         // which is why this closure exists
         if idx < func.stack.input {
-            // idx is referring to an arg
-            idx + locals
+            // idx is referring to an arg, skip the ret pointer!
+            idx + locals + 1
         } else {
             // idx is referring to a local
             idx - func.stack.input
         }
     };
+    let mut reg_alloc = RegisterAllocation::new();
     Ok(for entry in instructions {
         if args.verbose {
             write!(f, "// +{}; {} -> ", entry.excess_height, entry.enter_height)?;
@@ -320,82 +346,130 @@ pub fn emit_instructions<'a>(
                 Some(n) => writeln!(f, "{n}")?,
                 None => writeln!(f, "?")?,
             }
+            println!();
+            println!("reg alloc:{reg_alloc:?}");
+            println!("emitting: {}", entry.instruction);
         }
-        if let Some(label) = entry.label {
-            writeln!(f, ".{}", mangle::local_label(name, label))?;
-        }
-        let excess_height = entry.excess_height;
-        let r1 = excess_height + 1;
         match entry.instruction {
+            Instruction::Height(height) => {
+                reg_alloc = RegisterAllocation::normal(height);
+            }
             Instruction::Ret => {
-                writeln!(f, "ADD SP SP {}", func.stack.input + locals)?;
+                reg_alloc.normalize(args, f, max_regs)?;
+                if locals != 0 {
+                    writeln!(f, "ADD SP SP {locals}")?;
+                }
                 writeln!(f, "RET")?;
             }
             Instruction::Halt => writeln!(f, "HLT")?,
-            Instruction::Const(ref lit) => writeln!(f, "IMM ${r1} {lit}")?,
-            Instruction::Ref(idx) => writeln!(f, "ADD ${r1} SP {}", map_loc(idx))?,
-            Instruction::Get(idx) => writeln!(f, "LLOD ${r1} SP {}", map_loc(idx))?,
-            Instruction::Set(idx) => writeln!(f, "LSTR SP {} ${r1}", map_loc(idx))?,
-            Instruction::In(port) => writeln!(f, "IN ${r1} %{port}")?,
-            Instruction::Out(port) => writeln!(f, "OUT %{port} ${r1}")?,
-            Instruction::Jump(label) => writeln!(f, "JMP .{}", mangle::local_label(name, label))?,
+            Instruction::Const(ref lit) => writeln!(f, "IMM ${} {lit}", reg_alloc.apply_next())?,
+            Instruction::Ref(idx) => {
+                writeln!(f, "ADD ${} SP {}", reg_alloc.apply_next(), map_loc(idx))?
+            }
+            Instruction::Get(idx) => {
+                writeln!(f, "LLOD ${} SP {}", reg_alloc.apply_next(), map_loc(idx))?
+            }
+            Instruction::Set(idx) => {
+                writeln!(f, "LSTR SP {} ${}", map_loc(idx), reg_alloc.apply_pop1())?
+            }
+            Instruction::In(port) => writeln!(f, "IN ${} %{port}", reg_alloc.apply_next())?,
+            Instruction::Out(port) => writeln!(f, "OUT %{port} ${}", reg_alloc.apply_pop1())?,
+            Instruction::Label(label) => {
+                reg_alloc.normalize(args, f, max_regs)?;
+                writeln!(f, ".{}", mangle::local_label(func.name, label))?
+            }
+            Instruction::Jump(label) => {
+                reg_alloc.normalize(args, f, max_regs)?;
+                writeln!(f, "JMP .{}", mangle::local_label(func.name, label))?
+            }
             Instruction::Branch(prefix, label) => {
+                reg_alloc.normalize(args, f, max_regs)?;
                 if let Some(Function {
                     body:
                         FunctionBody::Urcl {
-                            branch: Some(ref branch),
-                            ..
+                            input: _,
+                            output: _,
+                            instructions: _,
+                            branch:
+                                Some(UrclBranchBody {
+                                    input,
+                                    instructions,
+                                }),
                         },
                     ..
                 }) = functions.get(prefix)
                 {
-                    urcl::emit_instructions(f, branch, Some((name, label)), excess_height)?;
+                    reg_alloc = urcl::emit_instructions(
+                        f,
+                        instructions,
+                        Some((func.name, label)),
+                        reg_alloc,
+                        input,
+                        &Default::default(),
+                        max_regs,
+                    )?;
                 } else {
                     unreachable!("Already checked that func exists.")
                 }
             }
-            Instruction::Perm(ref perm) => {
-                urcl::emit_instructions(
-                    f,
-                    &compile_permutation(perm, entry.pos),
-                    None,
-                    excess_height,
-                )?;
-            }
+            Instruction::Perm(ref perm) => reg_alloc.apply_permutation(perm),
             Instruction::Call(func) => {
                 if let Some(func) = functions.get(func) {
-                    match func.body {
+                    match &func.body {
                         FunctionBody::Urcl {
-                            ref instructions, ..
-                        } => urcl::emit_instructions(f, instructions, None, excess_height)?,
+                            input,
+                            output,
+                            instructions,
+                            branch: _,
+                        } => {
+                            reg_alloc = urcl::emit_instructions(
+                                f,
+                                instructions,
+                                None,
+                                reg_alloc,
+                                input,
+                                output,
+                                max_regs,
+                            )?
+                        }
+                        FunctionBody::Permutation(perm) => reg_alloc.apply_permutation(perm),
                         FunctionBody::Ursl { .. } => {
                             if args.verbose {
-                                writeln!(f, "// begin call {}", func.name)?;
+                                writeln!(f, "// begin call to {}", func.name)?;
                             }
-                            for i in 1..=excess_height {
+                            let params = reg_alloc.get(func.stack.input).to_vec();
+                            reg_alloc.pop(params.len());
+                            let used_regs = reg_alloc.all_used();
+                            for i in used_regs.iter().copied() {
                                 writeln!(f, "PSH ${i}")?;
                             }
-                            writeln!(
-                                f,
-                                "PSH ~+{}", // return pointer
-                                // 2 because of the jump, and we want the inst *after* that
-                                2 + func.stack.input
-                            )?;
-                            for i in 1..=func.stack.input {
-                                writeln!(f, "PSH ${}", excess_height + i)?;
+                            if params.len() != 0 {
+                                if args.verbose {
+                                    writeln!(f, "// push arguments")?
+                                }
+                                for p in params.iter().rev() {
+                                    writeln!(f, "PSH ${p}")?
+                                }
                             }
-                            writeln!(f, "JMP .{}", mangle::function_name(func.name.trim1('$')))?;
-
+                            writeln!(f, "CAL .{}", mangle::function_name(func.name))?;
+                            if params.len() != 0 {
+                                if args.verbose {
+                                    writeln!(f, "// pop arguments")?
+                                }
+                                writeln!(f, "ADD SP SP {}", params.len())?;
+                            }
                             if args.verbose {
-                                writeln!(f, "// return from {}", func.name)?;
+                                writeln!(f, "// pop rest of operands")?;
                             }
-                            if excess_height != 0 {
-                                for i in 1..=func.stack.output {
-                                    writeln!(f, "MOV ${} ${i}", i + excess_height)?;
-                                }
-                                for i in (1..=excess_height).rev() {
-                                    writeln!(f, "POP ${i}")?;
-                                }
+                            for i in used_regs.into_iter().rev() {
+                                writeln!(f, "POP ${}", i + func.stack.output)?
+                            }
+                            reg_alloc.offset(func.stack.output);
+                            for i in 1..=func.stack.output {
+                                reg_alloc.push(i)
+                            }
+                            if args.verbose {
+                                writeln!(f, "// end call to {}", func.name)?;
                             }
                         }
                     }
@@ -404,34 +478,44 @@ pub fn emit_instructions<'a>(
                 }
             }
             Instruction::IndirectCall(stack) => {
-                let func = excess_height + 1;
                 if args.verbose {
-                    writeln!(f, "// begin icall {stack}")?;
+                    writeln!(f, "// begin icall")?;
                 }
-                for i in 1..=excess_height {
+                let params = reg_alloc.get(stack.input).to_vec();
+                reg_alloc.pop(params.len());
+                let func = reg_alloc.top();
+                reg_alloc.pop(1);
+                let used_regs = reg_alloc.all_used();
+                for i in used_regs.iter().copied() {
                     writeln!(f, "PSH ${i}")?;
                 }
-                writeln!(
-                    f,
-                    "PSH ~+{}", // return pointer
-                    // 2 because of the jump, and we want the inst *after* that
-                    2 + stack.input
-                )?;
-                for i in 1..=stack.input {
-                    writeln!(f, "PSH ${}", func + i)?;
+                if params.len() != 0 {
+                    if args.verbose {
+                        writeln!(f, "// push arguments")?
+                    }
+                    for p in params.iter().rev() {
+                        writeln!(f, "PSH ${p}")?
+                    }
                 }
-                writeln!(f, "JMP ${func}")?;
-
+                writeln!(f, "CAL ${func}")?;
+                if params.len() != 0 {
+                    if args.verbose {
+                        writeln!(f, "// pop arguments")?
+                    }
+                    writeln!(f, "ADD SP SP {}", params.len())?;
+                }
                 if args.verbose {
-                    writeln!(f, "// return from icall")?;
+                    writeln!(f, "// pop rest of operands")?;
                 }
-                if excess_height != 0 {
-                    for i in 1..=stack.output {
-                        writeln!(f, "MOV ${} ${i}", i + excess_height)?;
-                    }
-                    for i in (1..=excess_height).rev() {
-                        writeln!(f, "POP ${i}")?;
-                    }
+                for i in used_regs.into_iter().rev() {
+                    writeln!(f, "POP ${}", i + stack.output)?
+                }
+                reg_alloc.offset(stack.output);
+                for i in 1..=stack.output {
+                    reg_alloc.push(i)
+                }
+                if args.verbose {
+                    writeln!(f, "// end icall")?;
                 }
             }
         }
