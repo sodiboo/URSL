@@ -423,9 +423,6 @@ fn parse_functions<'a>(
                 if ["halt", "ret"].contains(&name) {
                     err!(errors; unit; node.field("name", unit), "inst {name} is also defined as intrinsic");
                 }
-                if let Some(f) = functions.get(&name) {
-                    err!(errors; unit; node, "inst {name} is also defined at {}", f.pos);
-                }
                 let input = urcl::parse_stack_bindings(
                     node.children_by_field_name("input", &mut unit.tree.walk()),
                     unit,
@@ -444,55 +441,143 @@ fn parse_functions<'a>(
                     unit,
                 )
                 .extend_into(&mut errors);
-
-                let branch = node.child_by_field_name("branch").map(|branch_clause| {
-                    let input = urcl::parse_stack_bindings(
-                        branch_clause.children_by_field_name("input", &mut unit.tree.walk()),
-                        unit,
-                    );
-                    let instructions = urcl::parse_instructions(
-                        args,
-                        headers,
-                        branch_clause.field("instructions", unit),
-                        name,
-                        Some(
-                            &branch_clause
-                                .field("label", unit)
-                                .field("name", unit)
-                                .text(unit),
-                        ),
-                        unit,
-                    )
-                    .extend_into(&mut errors);
-                    UrclBranchBody {
-                        input,
-                        instructions,
+                let body = UrclMainBody {
+                    input,
+                    output,
+                    instructions,
+                    pos: node.pos(unit),
+                };
+                if let Some(Function {
+                    node: _,
+                    name: _,
+                    stack: old_stack,
+                    body: f_body,
+                    unit: _,
+                    pos: old_pos,
+                }) = functions.get_mut(name)
+                {
+                    if let FunctionBody::Urcl {
+                        overloads,
+                        branch: _,
+                    } = f_body
+                    {
+                        if old_stack.input != stack.input {
+                            err!(errors; unit; node,
+                                "inst {name} is defined with a different signature than before. Here it has {} input items, but before it had {} input items. Previous definition at {old_pos}",
+                                stack.input, old_stack.input,
+                            );
+                        }
+                        if old_stack.output != stack.output {
+                            err!(errors; unit; node,
+                                "inst {name} is defined with a different signature than before. Here it has {} output items, but before it had {} output items. Previous definition at {old_pos}",
+                                stack.output, old_stack.output,
+                            );
+                        }
+                        overloads.push(body);
+                    } else {
+                        err!(errors; unit; node, "inst {name} is also defined at {old_pos}");
                     }
-                });
-                let is_branch = branch.is_some();
-                if is_branch && stack.output != 1 {
-                    err!(errors; unit; node, "inst {name} has a branching variant, but does not return 1 value.")
-                }
-                functions.insert(
-                    name,
-                    Function {
-                        node,
+                } else {
+                    functions.insert(
                         name,
-                        stack,
-                        body: FunctionBody::Urcl {
-                            input,
-                            output,
-                            instructions,
-                            branch,
+                        Function {
+                            node,
+                            name,
+                            stack,
+                            body: FunctionBody::Urcl {
+                                overloads: vec![body],
+                                branch: None,
+                            },
+                            pos: node.pos(unit),
+                            unit,
                         },
-                        pos: node.pos(unit),
-                        unit,
-                    },
+                    );
+                    signatures.insert(name, (stack, false));
+                }
+            }
+            "inst_branch" => {
+                let name = node.field("name", unit).text(unit);
+                if ["halt", "ret"].contains(&name) {
+                    err!(errors; unit; node.field("name", unit), "inst {name} is also defined as intrinsic");
+                }
+                let input = urcl::parse_stack_bindings(
+                    node.children_by_field_name("input", &mut unit.tree.walk()),
+                    unit,
                 );
-                signatures.insert(name, (stack, is_branch));
+                let branch_destination = &node.field("label", unit).field("name", unit).text(unit);
+                let stack = stack!(input.len(); -> 1);
+                let instructions = urcl::parse_instructions(
+                    args,
+                    headers,
+                    node.field("instructions", unit),
+                    name,
+                    Some(branch_destination),
+                    unit,
+                )
+                .extend_into(&mut errors);
+                let branch = UrclBranchBody {
+                    input,
+                    instructions,
+                    pos: node.pos(unit),
+                };
+                if let Some(Function {
+                    node: _,
+                    name: _,
+                    stack: old_stack,
+                    body: f_body,
+                    unit: _,
+                    pos: old_pos,
+                }) = functions.get_mut(name)
+                {
+                    if let FunctionBody::Urcl {
+                        overloads: _,
+                        branch: branch_body,
+                    } = f_body
+                    {
+                        if old_stack.input != stack.input {
+                            err!(errors; unit; node,
+                                "branch {name} is defined with a different signature than before. Here it has {} input items, but before it had {} input items. Previous definition at {old_pos}",
+                                stack.input, old_stack.input,
+                            );
+                        }
+                        if old_stack.output != stack.output {
+                            err!(errors; unit; node,
+                                "branch {name} is defined with a different signature than before. Here it has {} output items, but before it had {} output items. Previous definition at {old_pos}",
+                                stack.output, old_stack.output,
+                            );
+                        }
+                        if let Some(old_branch) = branch_body.replace(branch) {
+                            err!(errors; unit; node,
+                                "branch {name} is also defined at {}", old_branch.pos);
+                        } else {
+                            signatures.get_mut(name).unwrap().1 = true;
+                        }
+                    } else {
+                        err!(errors; unit; node, "inst {name} is also defined at {old_pos}");
+                    }
+                } else {
+                    functions.insert(
+                        name,
+                        Function {
+                            node,
+                            name,
+                            stack,
+                            body: FunctionBody::Urcl {
+                                overloads: vec![],
+                                branch: Some(branch),
+                            },
+                            pos: node.pos(unit),
+                            unit,
+                        },
+                    );
+                    signatures.insert(name, (stack, true));
+                }
             }
             "inst_permutation" => {
                 let name = node.field("name", unit).text(unit);
+                if ["halt", "ret"].contains(&name) {
+                    err!(errors; unit; node.field("name", unit), "inst {name} is also defined as intrinsic");
+                }
                 if let Some(f) = functions.get(&name) {
                     panic!(
                         "inst {name} at {} is also defined at {}",
@@ -515,6 +600,45 @@ fn parse_functions<'a>(
                     },
                 );
                 signatures.insert(name, (stack, false));
+            }
+            "dunder_binary" => {
+                let name = node.field("name", unit).text(unit);
+                let instruction = node.field("instruction", unit);
+                functions.insert(
+                    name,
+                    Function {
+                        node,
+                        name,
+                        stack: stack!(2; -> 1),
+                        body: FunctionBody::Urcl {
+                            overloads: urcl::__binary__(node, instruction, unit),
+                            branch: None,
+                        },
+                        pos: node.pos(unit),
+                        unit,
+                    },
+                );
+                signatures.insert(name, (stack!(2; -> 1), false));
+            }
+            "dunder_branching" => {
+                let name = node.field("name", unit).text(unit);
+                let instruction = node.field("instruction", unit);
+                let branch = node.field("branch", unit);
+                functions.insert(
+                    name,
+                    Function {
+                        node,
+                        name,
+                        stack: stack!(2; -> 1),
+                        body: FunctionBody::Urcl {
+                            overloads: urcl::__binary__(node, instruction, unit),
+                            branch: Some(urcl::__branching__(node, branch, unit)),
+                        },
+                        pos: node.pos(unit),
+                        unit,
+                    },
+                );
+                signatures.insert(name, (stack!(2; -> 1), true));
             }
             _ => unknown_node(node, unit),
         }
@@ -555,32 +679,37 @@ fn parse_functions<'a>(
                     println!("}}\n");
                 }
             }
-            FunctionBody::Urcl {
-                input,
-                output,
-                instructions,
-                branch,
-            } => {
+            FunctionBody::Urcl { overloads, branch } => {
                 if args.verbose {
-                    print!("inst {}{input}", func.name);
-                    if output.len() != 0 {
-                        print!(" ->{output}");
-                    }
-                    println!(" {{");
-                    for entry in instructions {
-                        println!("  {}", entry.instruction)
+                    for UrclMainBody {
+                        input,
+                        output,
+                        instructions,
+                        pos: _,
+                    } in overloads
+                    {
+                        print!("inst {}{input}", func.name);
+                        if output.len() != 0 {
+                            print!(" ->{output}");
+                        }
+                        println!(" {{");
+                        for entry in instructions {
+                            println!("  {}", entry.instruction)
+                        }
+                        println!("}}");
                     }
                     if let Some(UrclBranchBody {
                         input,
                         instructions,
+                        pos: _,
                     }) = branch
                     {
-                        println!("}} branch{input} {{");
+                        println!("branch {}{input} {{", func.name);
                         for entry in instructions {
                             println!("  {}", entry.instruction)
                         }
+                        println!("}}")
                     }
-                    println!("}}")
                 }
             }
             FunctionBody::Permutation(perm) => {

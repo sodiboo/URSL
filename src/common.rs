@@ -86,17 +86,23 @@ pub enum FunctionBody<'a> {
         instructions: Vec<ursl::InstructionEntry<'a>>,
     },
     Urcl {
-        input: urcl::StackBindings<'a>,
-        output: urcl::StackBindings<'a>,
-        instructions: Vec<urcl::InstructionEntry<'a>>,
+        overloads: Vec<UrclMainBody<'a>>,
         branch: Option<UrclBranchBody<'a>>,
     },
     Permutation(Permutation),
 }
 
+pub struct UrclMainBody<'a> {
+    pub input: urcl::StackBindings<'a>,
+    pub output: urcl::StackBindings<'a>,
+    pub instructions: Vec<urcl::InstructionEntry<'a>>,
+    pub pos: Position<'a>,
+}
+
 pub struct UrclBranchBody<'a> {
     pub input: urcl::StackBindings<'a>,
     pub instructions: Vec<urcl::InstructionEntry<'a>>,
+    pub pos: Position<'a>,
 }
 
 pub trait PositionEntry {
@@ -228,6 +234,7 @@ pub fn lower_literal<'a>(args: &Args, headers: &Headers, mut element: Literal<'a
     element
 }
 
+#[cold]
 pub fn unknown_node(node: Node, unit: &CompilationUnit) -> ! {
     unreachable!("Unknown node kind `{}` at {}", node.kind(), node.pos(unit))
 }
@@ -246,20 +253,38 @@ impl<'a, T> SourceErrors<'a> for (T, Vec<SourceError<'a>>) {
     }
 }
 
-pub struct RegisterAllocation(Vec<usize>);
+#[derive(Clone)]
+pub struct RegisterAllocation<'a>(Vec<AllocationSlot<'a>>);
 
-impl RegisterAllocation {
+#[derive(Clone)]
+pub enum AllocationSlot<'a> {
+    Register(usize),
+    Literal(Literal<'a>),
+}
+
+impl Display for AllocationSlot<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        match self {
+            Self::Register(reg) => write!(f, "${reg}"),
+            Self::Literal(lit) => write!(f, "{lit}"),
+        }
+    }
+}
+
+impl<'a> RegisterAllocation<'a> {
     pub fn new() -> Self {
         Self(vec![])
     }
 
     pub fn normal(height: usize) -> Self {
-        Self((1..=height).collect())
+        Self((1..=height).map(AllocationSlot::Register).collect())
     }
 
     pub fn offset(&mut self, offset: usize) {
         for reg in self.0.iter_mut() {
-            *reg += offset;
+            if let AllocationSlot::Register(reg) = reg {
+                *reg += offset;
+            }
         }
     }
 
@@ -269,38 +294,63 @@ impl RegisterAllocation {
         }
     }
 
-    pub fn push(&mut self, new: usize) {
+    pub fn push(&mut self, new: AllocationSlot<'a>) {
         self.0.push(new);
     }
 
-    pub fn all_used(&self) -> Vec<usize> {
+    pub fn all_used_regs(&self) -> Vec<usize> {
         let mut used = Vec::with_capacity(self.0.len());
         for i in self.0.iter() {
-            if !used.contains(i) {
-                used.push(*i);
+            if let AllocationSlot::Register(i) = i {
+                if !used.contains(i) {
+                    used.push(*i);
+                }
             }
         }
         used
     }
 
-    pub fn get(&self, length: usize) -> &[usize] {
+    pub fn get(&self, length: usize) -> &[AllocationSlot<'a>] {
         &self.0[(self.0.len() - length)..]
     }
 
-    pub fn top(&self) -> usize {
-        *self.0.last().unwrap_or(&0)
+    pub fn top(&self) -> AllocationSlot<'a> {
+        self.0
+            .last()
+            .cloned()
+            .unwrap_or(AllocationSlot::Register(0))
     }
 
-    pub fn is_unique(&self, reg: usize) -> bool {
-        self.0.iter().filter(|&&r| r == reg).count() == 1
+    pub fn is_reg_unique(&self, reg: usize) -> bool {
+        self.0
+            .iter()
+            .filter(|r| match r {
+                AllocationSlot::Register(r) => *r == reg,
+                AllocationSlot::Literal(_) => false,
+            })
+            .count()
+            == 1
     }
 
-    pub fn next(&self) -> usize {
+    pub fn next_reg(&self) -> AllocationSlot<'a> {
         // pretty sure this is O(n^2) and can be improved, but i have no idea how to do so.
         // (the difficult part is reusing old regs, so max value is no good)
         for i in 1.. {
-            if !self.0.contains(&i) {
-                return i;
+            // bullshit impl of contains that does not rely on an impl PartialEq for Literal
+            if self
+                .0
+                .iter()
+                .filter_map(|r| {
+                    if let AllocationSlot::Register(r) = r {
+                        Some(*r)
+                    } else {
+                        None
+                    }
+                })
+                .find(|&r| r == i)
+                .is_none()
+            {
+                return AllocationSlot::Register(i);
             }
         }
 
@@ -310,13 +360,13 @@ impl RegisterAllocation {
         );
     }
 
-    pub fn apply_next(&mut self) -> usize {
-        let reg = self.next();
-        self.push(reg);
+    pub fn apply_next_reg(&mut self) -> AllocationSlot<'a> {
+        let reg = self.next_reg();
+        self.push(reg.clone());
         reg
     }
 
-    pub fn apply_pop1(&mut self) -> usize {
+    pub fn apply_pop1(&mut self) -> AllocationSlot<'a> {
         let reg = self.top();
         self.pop(1);
         reg
@@ -326,27 +376,57 @@ impl RegisterAllocation {
         let inputs = self.get(perm.input).to_vec();
         self.pop(inputs.len());
         for &i in perm.output.iter() {
-            self.push(inputs[i]);
+            self.push(inputs[i].clone());
         }
     }
 
-    pub fn normalize<'a>(
+    pub fn normalize(
         &mut self,
         args: &Args,
         f: &mut impl Write,
         max_regs: &mut usize,
+        top_literals_unchanged: usize,
     ) -> io::Result<()> {
-        let length = self.0.len();
+        let length = self.0.len() - top_literals_unchanged;
         let mut changes = self
             .0
             .iter()
             .enumerate()
-            // src is the value, dest is the index, enumerate gives (i, val)
-            // swap here for consistency, even though it could totally be filter_map
-            // dest is also 0-indexed but should be 1-indexed (skip zero reg), so add 1
-            .map(|(dest, &src)| (src, dest + 1))
-            .filter(|(src, dest)| (src != dest))
+            .take(length)
+            .filter_map(|(dest, slot)| {
+                if let AllocationSlot::Register(src) = slot {
+                    Some((*src, dest + 1))
+                } else {
+                    None
+                }
+            })
+            .filter(|(src, dest)| src != dest)
             .collect::<Vec<_>>();
+        let top_changes = self.0
+            .iter()
+            .skip(length)
+            .enumerate()
+            .filter_map(|(dest, slot)| {
+                if let AllocationSlot::Register(src) = slot {
+                    Some((*src, dest + length + 1))
+                } else {
+                    None
+                }
+            }).collect::<Vec<_>>();
+        let circular_temp_reg = length + top_changes.len() + 1;
+        changes.extend(top_changes);
+        let literals = self
+            .0
+            .iter()
+            .enumerate()
+            .take(length)
+            .filter_map(|(dest, slot)| {
+                if let AllocationSlot::Literal(lit) = slot {
+                    Some((lit, dest + 1))
+                } else {
+                    None
+                }
+            });
         if args.verbose {
             println!("normalize:{self:?}");
             for &(src, dest) in changes.iter() {
@@ -354,7 +434,10 @@ impl RegisterAllocation {
             }
         }
         // Don't use ? operator so that it still finishes all calculations even if writing fails.
-        let mut result = io::Result::Ok(());
+        let mut result = Ok(());
+        if args.verbose {
+            result = result.and_then(|()| writeln!(f, "// prev alloc:{self:?}"));
+        }
         // Changes that are written to a register that no other changes will read from. They are safe to do immediately.
         while let Some(dangling) = changes
             .iter()
@@ -364,16 +447,14 @@ impl RegisterAllocation {
             *max_regs = (*max_regs).max(src).max(dest);
             result = result.and_then(|()| writeln!(f, "MOV ${} ${}", dest, src));
         }
-        // Circular references are the only ones left, so a temporary register is needed
-        let temp = length + 1;
         while let Some((first_src, mut last_dest)) = changes.pop() {
-            let mut circular = vec![temp, first_src];
+            let mut circular = vec![circular_temp_reg, first_src];
             while let Some(i) = changes.iter().position(|&(src, _)| src == last_dest) {
                 let (_, dest) = changes.swap_remove(i);
                 circular.push(last_dest);
                 last_dest = dest;
             }
-            circular.push(temp);
+            circular.push(circular_temp_reg);
 
             for i in 1..circular.len() {
                 let src = circular[i];
@@ -383,17 +464,31 @@ impl RegisterAllocation {
             }
         }
 
-        for i in 0..self.0.len() {
-            self.0[i] = i + 1;
+        for (src, dest) in literals {
+            *max_regs = (*max_regs).max(dest);
+            result = result.and_then(|()| writeln!(f, "IMM ${} {}", dest, src));
+        }
+
+        for i in 0..length {
+            self.0[i] = AllocationSlot::Register(i + 1);
+        }
+        for i in length..self.0.len() {
+            // after `length`, literals are not normalized
+            if let AllocationSlot::Register(_) = self.0[i] {
+                self.0[i] = AllocationSlot::Register(i + 1);
+            }
+        }
+        if args.verbose {
+            result = result.and_then(|()| writeln!(f, "// new alloc:{self:?}"));
         }
         result
     }
 }
 
-impl Debug for RegisterAllocation {
+impl Debug for RegisterAllocation<'_> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        self.0.iter().fold(Ok(()), |register, &reg| {
-            register.and_then(|()| write!(f, " ${reg}"))
+        self.0.iter().fold(Ok(()), |result, slot| {
+            result.and_then(|()| write!(f, " {slot}"))
         })
     }
 }

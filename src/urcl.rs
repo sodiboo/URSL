@@ -292,11 +292,11 @@ pub fn emit_instructions<'a>(
     f: &mut impl Write,
     instructions: &Vec<urcl::InstructionEntry<'a>>,
     branch_target: Option<(&'a str, &'a str)>,
-    reg_alloc: RegisterAllocation,
+    reg_alloc: RegisterAllocation<'a>,
     StackBindings(input): &StackBindings<'a>,
     StackBindings(output): &StackBindings<'a>,
     max_regs: &mut usize,
-) -> io::Result<RegisterAllocation> {
+) -> io::Result<RegisterAllocation<'a>> {
     fn emit_dest(&dest: &BranchDestination, branch_target: Option<(&str, &str)>) -> String {
         match dest {
             BranchDestination::TemporaryLabel(_) => {
@@ -316,36 +316,44 @@ pub fn emit_instructions<'a>(
     }
 
     let mut regs = HashMap::new();
-    regs.insert(Register::Index(0), 0);
+    regs.insert(Register::Index(0), AllocationSlot::Register(0));
 
     {
         let input_regs = reg_alloc.get(input.len());
         for i in 0..input.len() {
             let input = input[i];
             if let Register::Input(_) = input {
-                regs.entry(input).or_insert_with(|| input_regs[i]);
+                regs.entry(input).or_insert_with(|| input_regs[i].clone());
             } else if let Register::Index(0) = input {
-                // discard input; no-op
-            } else if reg_alloc.is_unique(input_regs[i]) {
-                assert_eq!(regs.insert(input, input_regs[i]), None);
+                // Do nothing, this always maps to the zero reg
+            } else if let AllocationSlot::Register(reg) = input_regs[i] {
+                if reg_alloc.is_reg_unique(reg) {
+                    assert!(regs.insert(input, AllocationSlot::Register(reg)).is_none());
+                } else {
+                    let next = reg_alloc.next_reg();
+                    writeln!(f, "MOV {next} {}", input_regs[i])?;
+                    regs.insert(input, next);
+                }
             } else {
-                let next = reg_alloc.next();
-                writeln!(f, "MOV ${next} ${}", input_regs[i])?;
+                let next = reg_alloc.next_reg();
+                writeln!(f, "MOV {next} {}", input_regs[i])?;
                 regs.insert(input, next);
             }
         }
     }
 
     for &reg in output.iter() {
-        regs.entry(reg).or_insert_with(|| reg_alloc.next());
+        regs.entry(reg)
+            .or_insert_with(|| reg_alloc.next_reg());
     }
 
     for entry in instructions {
         match &entry.instruction {
             urcl::Instruction::In { dest, port } => writeln!(
                 f,
-                "IN ${} %{port}",
-                regs.entry(*dest).or_insert_with(|| reg_alloc.next()),
+                "IN {} %{port}",
+                regs.entry(*dest)
+                    .or_insert_with(|| reg_alloc.next_reg()),
             )?,
             urcl::Instruction::Out { port, source } => {
                 write!(f, "OUT %{port}")?;
@@ -353,8 +361,8 @@ pub fn emit_instructions<'a>(
                     Source::Literal(lit) => writeln!(f, " {lit}"),
                     Source::Register(reg) => writeln!(
                         f,
-                        " ${}",
-                        regs.entry(*reg).or_insert_with(|| reg_alloc.next())
+                        " {}",
+                        regs.entry(*reg).or_insert_with(|| reg_alloc.next_reg())
                     ),
                 }?
             }
@@ -367,8 +375,8 @@ pub fn emit_instructions<'a>(
                 match dest {
                     Destination::Register(reg) => write!(
                         f,
-                        " ${}",
-                        regs.entry(*reg).or_insert_with(|| reg_alloc.next())
+                        " {}",
+                        regs.entry(*reg).or_insert_with(|| reg_alloc.next_reg())
                     )?,
                     Destination::Branch(dest) => write!(f, " {}", emit_dest(dest, branch_target))?,
                 }
@@ -377,8 +385,8 @@ pub fn emit_instructions<'a>(
                         Source::Literal(lit) => write!(f, " {lit}"),
                         Source::Register(reg) => write!(
                             f,
-                            " ${}",
-                            regs.entry(*reg).or_insert_with(|| reg_alloc.next())
+                            " {}",
+                            regs.entry(*reg).or_insert_with(|| reg_alloc.next_reg())
                         ),
                     }?
                 }
@@ -390,10 +398,91 @@ pub fn emit_instructions<'a>(
     let mut reg_alloc = reg_alloc;
     reg_alloc.pop(input.len());
     for reg in output {
-        reg_alloc.push(regs[&reg]);
+        reg_alloc.push(regs[&reg].clone());
     }
     for (_, reg) in regs {
-        *max_regs = (*max_regs).max(reg);
+        if let AllocationSlot::Register(reg) = reg {
+            *max_regs = (*max_regs).max(reg);
+        }
     }
     Ok(reg_alloc)
+}
+
+pub fn __binary__<'a>(
+    node: Node<'a>,
+    instruction: Node<'a>,
+    unit: &'a CompilationUnit<'a>,
+) -> Vec<UrclMainBody<'a>> {
+    vec![
+        UrclMainBody {
+            input: StackBindings(vec![Register::Input("lhs"), Register::Input("rhs")]),
+            output: StackBindings(vec![Register::Named("out")]),
+            pos: node.pos(unit),
+            instructions: vec![InstructionEntry {
+                pos: instruction.pos(unit),
+                instruction: Instruction::Generic {
+                    op: instruction.text(unit),
+                    dest: Destination::Register(Register::Named("out")),
+                    sources: vec![
+                        Source::Register(Register::Input("lhs")),
+                        Source::Register(Register::Input("rhs")),
+                    ],
+                },
+            }],
+        },
+        UrclMainBody {
+            input: StackBindings(vec![Register::Named("lhs"), Register::Input("rhs")]),
+            output: StackBindings(vec![Register::Named("lhs")]),
+            pos: node.pos(unit),
+            instructions: vec![InstructionEntry {
+                pos: instruction.pos(unit),
+                instruction: Instruction::Generic {
+                    op: instruction.text(unit),
+                    dest: Destination::Register(Register::Named("lhs")),
+                    sources: vec![
+                        Source::Register(Register::Named("lhs")),
+                        Source::Register(Register::Input("rhs")),
+                    ],
+                },
+            }],
+        },
+        UrclMainBody {
+            input: StackBindings(vec![Register::Input("lhs"), Register::Named("rhs")]),
+            output: StackBindings(vec![Register::Named("rhs")]),
+            pos: node.pos(unit),
+            instructions: vec![InstructionEntry {
+                pos: instruction.pos(unit),
+                instruction: Instruction::Generic {
+                    op: instruction.text(unit),
+                    dest: Destination::Register(Register::Named("rhs")),
+                    sources: vec![
+                        Source::Register(Register::Input("lhs")),
+                        Source::Register(Register::Named("rhs")),
+                    ],
+                },
+            }],
+        },
+    ]
+}
+
+pub fn __branching__<'a>(
+    node: Node<'a>,
+    instruction: Node<'a>,
+    unit: &'a CompilationUnit<'a>,
+) -> UrclBranchBody<'a> {
+    UrclBranchBody {
+        input: StackBindings(vec![Register::Input("lhs"), Register::Input("rhs")]),
+        pos: node.pos(unit),
+        instructions: vec![InstructionEntry {
+            pos: instruction.pos(unit),
+            instruction: Instruction::Generic {
+                op: instruction.text(unit),
+                dest: Destination::Branch(BranchDestination::BranchLabel),
+                sources: vec![
+                    Source::Register(Register::Input("lhs")),
+                    Source::Register(Register::Input("rhs")),
+                ],
+            },
+        }],
+    }
 }

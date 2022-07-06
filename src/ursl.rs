@@ -162,7 +162,13 @@ pub fn parse_instructions<'a>(
             "height" => {
                 let operand = op!(num);
                 if let Some(height) = height {
-                    if height != operand {
+                    if height == operand {
+                        // do not put a height instruction when it's nop. emit will assume normalized allocation, which is only okay to do if the height was None
+                        continue;
+                    } else {
+                        // However, if it was different and we're emitting an error, allow the stack to be normalized.
+                        // My intutiton says this will probably make more faulty code be slightly less broken with --fuck-it
+                        // so yeah, fuck it. allow whatever here. it's not my problem if you intentionally suppress errors
                         err!(errors; unit; inst, "Height directive doesn't match the correct stack height (stack here has height of {height})");
                     }
                 }
@@ -355,50 +361,51 @@ pub fn emit_instructions<'a>(
                 reg_alloc = RegisterAllocation::normal(height);
             }
             Instruction::Ret => {
-                reg_alloc.normalize(args, f, max_regs)?;
+                reg_alloc.normalize(args, f, max_regs, 0)?;
                 if locals != 0 {
                     writeln!(f, "ADD SP SP {locals}")?;
                 }
                 writeln!(f, "RET")?;
             }
             Instruction::Halt => writeln!(f, "HLT")?,
-            Instruction::Const(ref lit) => writeln!(f, "IMM ${} {lit}", reg_alloc.apply_next())?,
+            Instruction::Const(ref lit) => reg_alloc.push(AllocationSlot::Literal(lit.clone())),
             Instruction::Ref(idx) => {
-                writeln!(f, "ADD ${} SP {}", reg_alloc.apply_next(), map_loc(idx))?
+                writeln!(f, "ADD {} SP {}", reg_alloc.apply_next_reg(), map_loc(idx))?
             }
             Instruction::Get(idx) => {
-                writeln!(f, "LLOD ${} SP {}", reg_alloc.apply_next(), map_loc(idx))?
+                writeln!(f, "LLOD {} SP {}", reg_alloc.apply_next_reg(), map_loc(idx))?
             }
             Instruction::Set(idx) => {
-                writeln!(f, "LSTR SP {} ${}", map_loc(idx), reg_alloc.apply_pop1())?
+                writeln!(f, "LSTR SP {} {}", map_loc(idx), reg_alloc.apply_pop1())?
             }
-            Instruction::In(port) => writeln!(f, "IN ${} %{port}", reg_alloc.apply_next())?,
-            Instruction::Out(port) => writeln!(f, "OUT %{port} ${}", reg_alloc.apply_pop1())?,
+            Instruction::In(port) => writeln!(f, "IN {} %{port}", reg_alloc.apply_next_reg())?,
+            Instruction::Out(port) => writeln!(f, "OUT %{port} {}", reg_alloc.apply_pop1())?,
             Instruction::Label(label) => {
-                reg_alloc.normalize(args, f, max_regs)?;
+                reg_alloc.normalize(args, f, max_regs, 0)?;
                 writeln!(f, ".{}", mangle::local_label(func.name, label))?
             }
             Instruction::Jump(label) => {
-                reg_alloc.normalize(args, f, max_regs)?;
+                reg_alloc.normalize(args, f, max_regs, 0)?;
                 writeln!(f, "JMP .{}", mangle::local_label(func.name, label))?
             }
             Instruction::Branch(prefix, label) => {
-                reg_alloc.normalize(args, f, max_regs)?;
                 if let Some(Function {
                     body:
                         FunctionBody::Urcl {
-                            input: _,
-                            output: _,
-                            instructions: _,
+                            overloads: _,
                             branch:
                                 Some(UrclBranchBody {
                                     input,
                                     instructions,
+                                    pos: _,
                                 }),
                         },
                     ..
                 }) = functions.get(prefix)
                 {
+                    let top_literals_unchanged = input.len();
+                    println!("{top_literals_unchanged}");
+                    reg_alloc.normalize(args, f, max_regs, top_literals_unchanged)?;
                     reg_alloc = urcl::emit_instructions(
                         f,
                         instructions,
@@ -417,20 +424,41 @@ pub fn emit_instructions<'a>(
                 if let Some(func) = functions.get(func) {
                     match &func.body {
                         FunctionBody::Urcl {
-                            input,
-                            output,
-                            instructions,
+                            overloads,
                             branch: _,
                         } => {
-                            reg_alloc = urcl::emit_instructions(
-                                f,
-                                instructions,
-                                None,
-                                reg_alloc,
-                                input,
-                                output,
-                                max_regs,
-                            )?
+                            let (new_reg_alloc, emitted, new_max_regs) = overloads
+                                .iter()
+                                .map(
+                                    |UrclMainBody {
+                                         input,
+                                         output,
+                                         instructions,
+                                         pos: _,
+                                     }| {
+                                        let mut emit = Vec::new();
+                                        let mut max_regs = 0;
+                                        (
+                                            urcl::emit_instructions(
+                                                &mut emit,
+                                                instructions,
+                                                None,
+                                                reg_alloc.clone(),
+                                                input,
+                                                output,
+                                                &mut max_regs,
+                                            )
+                                            .unwrap(),
+                                            String::from_utf8(emit).unwrap(),
+                                            max_regs,
+                                        )
+                                    },
+                                )
+                                .max_by_key(|(_, emit, _)| emit.lines().count())
+                                .expect("there should be at least one non-branching overload");
+                            reg_alloc = new_reg_alloc;
+                            write!(f, "{emitted}")?;
+                            *max_regs = new_max_regs;
                         }
                         FunctionBody::Permutation(perm) => reg_alloc.apply_permutation(perm),
                         FunctionBody::Ursl { .. } => {
@@ -439,7 +467,7 @@ pub fn emit_instructions<'a>(
                             }
                             let params = reg_alloc.get(func.stack.input).to_vec();
                             reg_alloc.pop(params.len());
-                            let used_regs = reg_alloc.all_used();
+                            let used_regs = reg_alloc.all_used_regs();
                             for i in used_regs.iter().copied() {
                                 writeln!(f, "PSH ${i}")?;
                             }
@@ -448,7 +476,7 @@ pub fn emit_instructions<'a>(
                                     writeln!(f, "// push arguments")?
                                 }
                                 for p in params.iter().rev() {
-                                    writeln!(f, "PSH ${p}")?
+                                    writeln!(f, "PSH {p}")?
                                 }
                             }
                             writeln!(f, "CAL .{}", mangle::function_name(func.name))?;
@@ -466,7 +494,7 @@ pub fn emit_instructions<'a>(
                             }
                             reg_alloc.offset(func.stack.output);
                             for i in 1..=func.stack.output {
-                                reg_alloc.push(i)
+                                reg_alloc.push(AllocationSlot::Register(i))
                             }
                             if args.verbose {
                                 writeln!(f, "// end call to {}", func.name)?;
@@ -485,7 +513,7 @@ pub fn emit_instructions<'a>(
                 reg_alloc.pop(params.len());
                 let func = reg_alloc.top();
                 reg_alloc.pop(1);
-                let used_regs = reg_alloc.all_used();
+                let used_regs = reg_alloc.all_used_regs();
                 for i in used_regs.iter().copied() {
                     writeln!(f, "PSH ${i}")?;
                 }
@@ -494,10 +522,10 @@ pub fn emit_instructions<'a>(
                         writeln!(f, "// push arguments")?
                     }
                     for p in params.iter().rev() {
-                        writeln!(f, "PSH ${p}")?
+                        writeln!(f, "PSH {p}")?
                     }
                 }
-                writeln!(f, "CAL ${func}")?;
+                writeln!(f, "CAL {func}")?;
                 if params.len() != 0 {
                     if args.verbose {
                         writeln!(f, "// pop arguments")?
@@ -512,7 +540,7 @@ pub fn emit_instructions<'a>(
                 }
                 reg_alloc.offset(stack.output);
                 for i in 1..=stack.output {
-                    reg_alloc.push(i)
+                    reg_alloc.push(AllocationSlot::Register(i))
                 }
                 if args.verbose {
                     writeln!(f, "// end icall")?;

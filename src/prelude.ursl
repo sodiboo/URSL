@@ -1,3 +1,16 @@
+// __binary__ and __branching__ are internal unstable syntax!
+//
+// __binary__ is used to declare three overloads of:
+//
+// &a <b> -> &a
+// <a> &b -> &b
+// <a> <b> -> &out
+//
+// __branching__ does the same but provides a branch <a> <b> -> :dest overload as well
+//
+// honestly i'll probably keep this for a while, but please do not use it as it is purely
+// intended for my own use in this file to reduce repetitive code lol.
+
 inst nop [] -> []
 inst pop [a] -> []
 inst dup [a] -> [a a]
@@ -8,54 +21,55 @@ inst load &a -> &a { LOD &a &a }
 inst store <out> <src> { STR <out> <src> }
 inst copy <out> <src> { CPY <out> <src> }
 
-inst bool &a -> &a { SETNZ &a &a } branch <src> -> :dest { BNZ :dest <src> }
+inst bool &a -> &a { SETNZ &a &a }
+inst not &a -> &a { NOT &a &a }
+
+branch bool <src> -> :dest { BNZ :dest <src> }
 // this is comparing to @MAX because it's bitwise NOT, and not logical NOT
-// for logical NOT, that would be bool; not, which *is* equivalent for the trivial 0 or @MAX case
-inst not &a -> &a { NOT &a &a } branch <src> -> :dest { BNE :dest <src> @MAX }
+// for logical NOT, that would be `bool not`, which *is* equivalent for the trivial 0 or @MAX case
+branch not <src> -> :dest { BNE :dest <src> @MAX }
 
-inst xor &a <b> -> &a { XOR &a &a <b> }
-inst xnor &a <b> -> &a { XNOR &a &a <b> }
+__binary__ xor -> XOR;
+__binary__ xnor -> XNOR;
 
-inst and &a <b> -> &a { AND &a &a <b> }
-inst nand &a <b> -> &a { NAND &a &a <b> }
+__binary__ and -> AND;
+__binary__ nand -> NAND;
 
-inst or &a <b> -> &a { OR &a &a <b> }
-inst nor &a <b> -> &a { NOR &a &a <b> }
+__binary__ or -> OR;
+__binary__ nor -> NOR;
 
-// add, sub
-inst add &a <b> -> &a { ADD &a &a <b> }
-inst sub &a <b> -> &a { SUB &a &a <b> }
+__binary__ add -> ADD;
+__binary__ sub -> SUB;
 
-// inc, dec
 inst inc &a -> &a { INC &a &a }
 inst dec &a -> &a { DEC &a &a }
-
-inst carry &a <b> -> &a { SETC &a &a <b> } branch <a> <b> -> :dest { BRC :dest <a> <b> }
 inst neg &a -> &a { NEG &a &a }
 
-inst mult &a <b> -> &a { MLT &a &a <b> }
-inst div &a <b> -> &a { DIV &a &a <b> }
-inst sdiv &a <b> -> &a { SDIV &a &a <b> }
-inst mod &a <b> -> &a { MOD &a &a <b> }
-inst smod &a <b> -> &a { SMOD &a &a <b> }
+__binary__ mult -> MLT;
+__binary__ div -> DIV;
+__binary__ sdiv -> SDIV;
+__binary__ mod -> MOD;
+__binary__ smod -> SMOD;
 
 inst rsh &a -> &a { RSH &a &a }
 inst ash &a -> &a { SRS &a &a }
 inst lsh &a -> &a { LSH &a &a }
 
-inst brsh &a <b> -> &a { BSR &a &a <b> }
-inst bash &a <b> -> &a { BSS &a &a <b> }
-inst blsh &a <b> -> &a { BSL &a &a <b> }
+__binary__ brsh -> BSR;
+__binary__ bash -> BSS;
+__binary__ blsh -> BSL;
 
-inst eq &a <b> -> &a { SETE &a &a <b> } branch <a> <b> -> :dest { BRE :dest <a> <b> }
-inst ne &a <b> -> &a { SETNE &a &a <b> } branch <a> <b> -> :dest { BNE :dest <a> <b> }
+__branching__ carry -> SETC + BRC;
 
-inst sgt &a <b> -> &a { SSETG &a &a <b> } branch <a> <b> -> :dest { SBRG :dest <a> <b> }
-inst sgte &a <b> -> &a { SSETGE &a &a <b> } branch <a> <b> -> :dest { SBGE :dest <a> <b> }
-inst slt &a <b> -> &a { SSETL &a &a <b> } branch <a> <b> -> :dest { SBRL :dest <a> <b> }
-inst slte &a <b> -> &a { SSETLE &a &a <b> } branch <a> <b> -> :dest { SBLE :dest <a> <b> }
+__branching__ eq -> SETE + BRE;
+__branching__ ne -> SETNE + BNE;
 
-inst gt &a <b> -> &a { SETG &a &a <b> } branch <a> <b> -> :dest { BRG :dest <a> <b> }
-inst gte &a <b> -> &a { SETGE &a &a <b> } branch <a> <b> -> :dest { BGE :dest <a> <b> }
-inst lt &a <b> -> &a { SETL &a &a <b> } branch <a> <b> -> :dest { BRL :dest <a> <b> }
-inst lte &a <b> -> &a { SETLE &a &a <b> } branch <a> <b> -> :dest { BLE :dest <a> <b> }
+__branching__ gt -> SETG + BRG;
+__branching__ gte -> SETGE + BGE;
+__branching__ lt -> SETL + BRL;
+__branching__ lte -> SETLE + BLE;
+
+__branching__ sgt -> SSETG + SBRG;
+__branching__ sgte -> SSETGE + SBGE;
+__branching__ slt -> SSETL + SBRL;
+__branching__ slte -> SSETLE + SBLE;
