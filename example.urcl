@@ -16,10 +16,8 @@ DW [ 1 2 3 4 @MAX ]
 DW [ .func__fib ]
 .func__fib
 LLOD $1 SP 1
-MOV $2 $1
-BRE .label__fib__base_under_case $2 0
-MOV $2 $1
-BRE .label__fib__base_under_case $2 1
+BRE .label__fib__base_under_case $1 0
+BRE .label__fib__base_under_case $1 1
 MOV $2 1
 SUB $2 $1 $2
 PSH $1

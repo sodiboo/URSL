@@ -400,19 +400,30 @@ impl<'a> RegisterAllocation<'a> {
                     None
                 }
             })
-            .filter(|(src, dest)| src != dest)
             .collect::<Vec<_>>();
-        let top_changes = self.0
-            .iter()
+        let mut ignored_on_purpose = Vec::new();
+        let top_changes = self
+            .0
+            .iter_mut()
             .skip(length)
             .enumerate()
-            .filter_map(|(dest, slot)| {
+            .filter_map(|(i, slot)| {
                 if let AllocationSlot::Register(src) = slot {
-                    Some((*src, dest + length + 1))
+                    // if the register is already used in the pre-shuffle part, just assign it to the final destination and don't touch it here!
+                    // note that it does not fucking matter which dest is chosen on the off chance that the find will be valid for several items
+                    if let Some((_, dest)) = changes.iter().find(|(s, _)| *s == *src) {
+                        ignored_on_purpose.push(i + 1);
+                        *src = *dest;
+                        None
+                    } else {
+                        Some((*src, i + length + 1))
+                    }
                 } else {
                     None
                 }
-            }).collect::<Vec<_>>();
+            })
+            .collect::<Vec<_>>();
+        changes = changes.into_iter().filter(|(src, dest)| src != dest).collect();
         let circular_temp_reg = length + top_changes.len() + 1;
         changes.extend(top_changes);
         let literals = self
@@ -473,6 +484,9 @@ impl<'a> RegisterAllocation<'a> {
             self.0[i] = AllocationSlot::Register(i + 1);
         }
         for i in length..self.0.len() {
+            if ignored_on_purpose.contains(&i) {
+                continue
+            }
             // after `length`, literals are not normalized
             if let AllocationSlot::Register(_) = self.0[i] {
                 self.0[i] = AllocationSlot::Register(i + 1);

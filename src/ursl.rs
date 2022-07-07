@@ -403,9 +403,7 @@ pub fn emit_instructions<'a>(
                     ..
                 }) = functions.get(prefix)
                 {
-                    let top_literals_unchanged = input.len();
-                    println!("{top_literals_unchanged}");
-                    reg_alloc.normalize(args, f, max_regs, top_literals_unchanged)?;
+                    reg_alloc.normalize(args, f, max_regs, input.len())?;
                     reg_alloc = urcl::emit_instructions(
                         f,
                         instructions,
