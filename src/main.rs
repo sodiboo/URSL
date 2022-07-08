@@ -111,10 +111,6 @@ macro_rules! colors {
         let [r, g, b] = hex!($hex);
         format!("\x1b[0;38;2;{r};{g};{b}m")
     }};
-    (@value ($hex:literal underline)) => {{
-        let [r, g, b] = hex!($hex);
-        format!("\x1b[4;38;2;{r};{g};{b}m")
-    }};
     (@value ($hex:literal bold)) => {{
         let [r, g, b] = hex!($hex);
         format!("\x1b[1;38;2;{r};{g};{b}m")
@@ -146,7 +142,6 @@ fn main() -> io::Result<()> {
     )
     .unwrap();
     let (recognized_names, formats) = colors![
-        "ERROR" => ("FF0000" underline),
         "comment" => "6A9955",
         "number" => "B5CEA8",
         "port" => "4EC9B0",
