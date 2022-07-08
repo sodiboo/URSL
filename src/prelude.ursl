@@ -1,15 +1,33 @@
-// __binary__ and __branching__ are internal unstable syntax!
+// __unary__, __binary__ and __branching__ are internal unstable syntax!
+//
+// __unary__ is used to declare two overloads of:
+//
+//  &a  -> &a
+// <&a> -> &out
 //
 // __binary__ is used to declare three overloads of:
 //
-// &a <b> -> &a
-// <a> &b -> &b
-// <a> <b> -> &out
+//  &a  <&b> -> &a
+// <&a>  &b  -> &b
+// <&a> <&b> -> &out
 //
-// __branching__ does the same but provides a branch <a> <b> -> :dest overload as well
+// __branching__ does the same as __binary__ but provides a branch <&a> <&b> -> :dest overload as well
 //
-// honestly i'll probably keep this for a while, but please do not use it as it is purely
-// intended for my own use in this file to reduce repetitive code lol.
+// the reason these overloads are necessary is so that certain combinations of aliased allocations and
+// stack items containing literals can be optimized to a single instruction without needing to emit redundant MOVs.
+//
+// these specific overloads are a very common pattern for custom instructions, used for almost everything
+// here in the prelude, hence the shorthand syntax. they can't be the default behaviour, because more
+// complex translations like repeated addition for `mult` cannot fit all these overloads at once.
+//
+// the absence or presence of these overloads are not visible at all to user code.
+// they do absolutely nothing other than optimize code size/speed slightly.
+// that is why this syntax doesn't need to be officially documented in the README.
+//
+// honestly i'll probably keep this syntax for a while, if not forever, but please do not use it as
+// it is purely intended for my own use in this file to reduce repetitive code.
+// especially if you're writing tooling that autogenerates instructions
+// please generate overloads and not the internal syntax!
 
 inst nop [] -> []
 inst pop [a] -> []
@@ -17,17 +35,19 @@ inst dup [a] -> [a a]
 inst swap [a b] -> [b a]
 inst over [a b] -> [a b a]
 
-inst load &a -> &a { LOD &a &a }
-inst store <out> <src> { STR <out> <src> }
-inst copy <out> <src> { CPY <out> <src> }
+inst null -> $0 {}
 
-inst bool &a -> &a { SETNZ &a &a }
-inst not &a -> &a { NOT &a &a }
+__unary__ load -> LOD;
+inst store <&out> <&src> { STR &out &src }
+inst copy <&out> <&src> { CPY &out &src }
 
-branch bool <src> -> :dest { BNZ :dest <src> }
+__unary__ bool -> SETNZ;
+__unary__ not -> NOT;
+
+branch bool <&src> -> :dest { BNZ :dest &src }
 // this is comparing to @MAX because it's bitwise NOT, and not logical NOT
 // for logical NOT, that would be `bool not`, which *is* equivalent for the trivial 0 or @MAX case
-branch not <src> -> :dest { BNE :dest <src> @MAX }
+branch not <&src> -> :dest { BNE :dest &src @MAX }
 
 __binary__ xor -> XOR;
 __binary__ xnor -> XNOR;
@@ -41,9 +61,9 @@ __binary__ nor -> NOR;
 __binary__ add -> ADD;
 __binary__ sub -> SUB;
 
-inst inc &a -> &a { INC &a &a }
-inst dec &a -> &a { DEC &a &a }
-inst neg &a -> &a { NEG &a &a }
+__unary__ inc -> INC;
+__unary__ dec -> DEC;
+__unary__ neg -> NEG;
 
 __binary__ mult -> MLT;
 __binary__ div -> DIV;
@@ -51,9 +71,9 @@ __binary__ sdiv -> SDIV;
 __binary__ mod -> MOD;
 __binary__ smod -> SMOD;
 
-inst rsh &a -> &a { RSH &a &a }
-inst ash &a -> &a { SRS &a &a }
-inst lsh &a -> &a { LSH &a &a }
+__unary__ rsh -> RSH;
+__unary__ ash -> SRS;
+__unary__ lsh -> LSH;
 
 __binary__ brsh -> BSR;
 __binary__ bash -> BSS;

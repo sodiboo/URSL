@@ -1,5 +1,5 @@
 use super::*;
-use std::fmt::{Display, Formatter, Result};
+use std::fmt::{self, Display, Formatter, Result};
 
 pub struct InstructionEntry<'a> {
     pub excess_height: usize,
@@ -104,9 +104,17 @@ pub fn parse_instructions<'a>(
             (num) => {
                 parse_num(op!().text(unit))
             };
-            (literal) => {
-                lower_literal(args, headers, parse_literal(op!(), unit))
-            };
+            (literal) => {{
+                let node = op!();
+                lower_literal(
+                    args,
+                    headers,
+                    parse_literal(node, unit).extend_into(&mut errors),
+                    node,
+                    unit,
+                )
+                .extend_into(&mut errors)
+            }};
             (func) => {
                 op!().text(unit)
             };
@@ -347,11 +355,15 @@ pub fn emit_instructions<'a>(
     let mut reg_alloc = RegisterAllocation::new();
     Ok(for entry in instructions {
         if args.verbose {
+            writeln!(f)?;
+            writeln!(f, "// stack:{reg_alloc:?}")?;
             write!(f, "// +{}; {} -> ", entry.excess_height, entry.enter_height)?;
             match entry.exit_height {
                 Some(n) => writeln!(f, "{n}")?,
                 None => writeln!(f, "?")?,
             }
+            writeln!(f, "// {}", entry.instruction)?;
+
             println!();
             println!("reg alloc:{reg_alloc:?}");
             println!("emitting: {}", entry.instruction);
@@ -436,67 +448,62 @@ pub fn emit_instructions<'a>(
                                      }| {
                                         let mut emit = Vec::new();
                                         let mut max_regs = 0;
-                                        (
-                                            urcl::emit_instructions(
-                                                &mut emit,
-                                                instructions,
-                                                None,
-                                                reg_alloc.clone(),
-                                                input,
-                                                output,
-                                                &mut max_regs,
-                                            )
-                                            .unwrap(),
-                                            String::from_utf8(emit).unwrap(),
-                                            max_regs,
+                                        let reg_alloc = urcl::emit_instructions(
+                                            &mut emit,
+                                            instructions,
+                                            None,
+                                            reg_alloc.clone(),
+                                            input,
+                                            output,
+                                            &mut max_regs,
                                         )
+                                        .unwrap();
+                                        let emit = String::from_utf8(emit).unwrap();
+                                        (reg_alloc, emit, max_regs)
                                     },
                                 )
-                                .max_by_key(|(_, emit, _)| emit.lines().count())
+                                .min_by(|(_, a_emit, a_max_regs), (_, b_emit, b_max_regs)| {
+                                    a_emit
+                                        .lines()
+                                        .count()
+                                        .cmp(&b_emit.lines().count())
+                                        .then(a_max_regs.cmp(b_max_regs))
+                                })
                                 .expect("there should be at least one non-branching overload");
                             reg_alloc = new_reg_alloc;
                             write!(f, "{emitted}")?;
                             *max_regs = new_max_regs;
                         }
                         FunctionBody::Permutation(perm) => reg_alloc.apply_permutation(perm),
-                        FunctionBody::Ursl { .. } => {
-                            if args.verbose {
-                                writeln!(f, "// begin call to {}", func.name)?;
-                            }
+
+                        // Technically ``FunctionBody::Deferred`` should never appear here.
+                        // But by definition it should be identical to a ``FunctionBody::Ursl``.
+                        // So therefore, emitting should act the exact same.
+                        FunctionBody::Deferred | FunctionBody::Ursl { .. } => {
                             let params = reg_alloc.get(func.stack.input).to_vec();
                             reg_alloc.pop(params.len());
-                            let used_regs = reg_alloc.all_used_regs();
-                            for i in used_regs.iter().copied() {
-                                writeln!(f, "PSH ${i}")?;
-                            }
-                            if params.len() != 0 {
-                                if args.verbose {
-                                    writeln!(f, "// push arguments")?
-                                }
-                                for p in params.iter().rev() {
-                                    writeln!(f, "PSH {p}")?
-                                }
-                            }
-                            writeln!(f, "CAL .{}", mangle::function_name(func.name))?;
-                            if params.len() != 0 {
-                                if args.verbose {
-                                    writeln!(f, "// pop arguments")?
-                                }
-                                writeln!(f, "ADD SP SP {}", params.len())?;
-                            }
-                            if args.verbose {
-                                writeln!(f, "// pop rest of operands")?;
-                            }
-                            for i in used_regs.into_iter().rev() {
-                                writeln!(f, "POP ${}", i + func.stack.output)?
-                            }
-                            reg_alloc.offset(func.stack.output);
-                            for i in 1..=func.stack.output {
-                                reg_alloc.push(AllocationSlot::Register(i))
-                            }
-                            if args.verbose {
-                                writeln!(f, "// end call to {}", func.name)?;
-                            }
+                            write_call(
+                                f,
+                                args,
+                                CallDest::Slot(AllocationSlot::Literal(Literal::Func(func.name))),
+                                func.stack,
+                                params,
+                                &mut reg_alloc,
+                                &CallingConvention::URSL,
+                            )?;
+                        }
+                        FunctionBody::Extern(call_convention, label) => {
+                            let params = reg_alloc.get(func.stack.input).to_vec();
+                            reg_alloc.pop(params.len());
+                            write_call(
+                                f,
+                                args,
+                                CallDest::ExactLabel(label),
+                                func.stack,
+                                params,
+                                &mut reg_alloc,
+                                call_convention,
+                            )?;
                         }
                     }
                 } else {
@@ -504,46 +511,74 @@ pub fn emit_instructions<'a>(
                 }
             }
             Instruction::IndirectCall(stack) => {
-                if args.verbose {
-                    writeln!(f, "// begin icall")?;
-                }
                 let params = reg_alloc.get(stack.input).to_vec();
                 reg_alloc.pop(params.len());
                 let func = reg_alloc.top();
                 reg_alloc.pop(1);
-                let used_regs = reg_alloc.all_used_regs();
-                for i in used_regs.iter().copied() {
-                    writeln!(f, "PSH ${i}")?;
-                }
-                if params.len() != 0 {
-                    if args.verbose {
-                        writeln!(f, "// push arguments")?
-                    }
-                    for p in params.iter().rev() {
-                        writeln!(f, "PSH {p}")?
-                    }
-                }
-                writeln!(f, "CAL {func}")?;
-                if params.len() != 0 {
-                    if args.verbose {
-                        writeln!(f, "// pop arguments")?
-                    }
-                    writeln!(f, "ADD SP SP {}", params.len())?;
-                }
-                if args.verbose {
-                    writeln!(f, "// pop rest of operands")?;
-                }
-                for i in used_regs.into_iter().rev() {
-                    writeln!(f, "POP ${}", i + stack.output)?
-                }
-                reg_alloc.offset(stack.output);
-                for i in 1..=stack.output {
-                    reg_alloc.push(AllocationSlot::Register(i))
-                }
-                if args.verbose {
-                    writeln!(f, "// end icall")?;
-                }
+                write_call(
+                    f,
+                    args,
+                    CallDest::Slot(func),
+                    stack,
+                    params,
+                    &mut reg_alloc,
+                    &CallingConvention::URSL,
+                )?;
             }
         }
     })
+}
+
+enum CallDest<'a> {
+    ExactLabel(&'a str),
+    Slot(AllocationSlot<'a>),
+}
+
+impl Display for CallDest<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            CallDest::ExactLabel(label) => write!(f, ".{label}"),
+            CallDest::Slot(slot) => write!(f, "{slot}"),
+        }
+    }
+}
+
+fn write_call(
+    f: &mut impl Write,
+    args: &Args,
+    func: CallDest,
+    stack: StackBehaviour,
+    params: Vec<AllocationSlot>,
+    reg_alloc: &mut RegisterAllocation,
+    call_convention: &CallingConvention,
+) -> io::Result<()> {
+    match call_convention {
+        // These are equivalent. I think. But I don't think i wanna guarantee that forever by defining that URSL uses the URCL++ calling convention yet.
+        CallingConvention::URCLpp | CallingConvention::URSL => {
+            let used_regs = reg_alloc.all_used_regs();
+            for i in used_regs.iter().copied() {
+                writeln!(f, "PSH ${i}")?;
+            }
+            if params.len() != 0 {
+                if args.verbose {
+                    writeln!(f, "// args")?
+                }
+                for p in params.iter().rev() {
+                    writeln!(f, "PSH {p}")?
+                }
+            }
+            writeln!(f, "CAL {func}")?;
+            if params.len() != 0 {
+                writeln!(f, "ADD SP SP {}", params.len())?;
+            }
+            for i in used_regs.into_iter().rev() {
+                writeln!(f, "POP ${}", i + stack.output)?
+            }
+            reg_alloc.offset(stack.output);
+            for i in 1..=stack.output {
+                reg_alloc.push(AllocationSlot::Register(i))
+            }
+        }
+    }
+    Ok(())
 }

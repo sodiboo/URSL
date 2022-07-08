@@ -5,34 +5,33 @@ MINREG 2
 CAL .func__main
 HLT
 .data__str
-DW [ 'H' 'e' 'l' 'l' 'o' ',' 32 'W' 'o' 'r' 'l' 'd' ]
+DW [ ]
 .data__escape
 DW '\n'
 .data__num
 DW 32
 .data__nums
-DW [ 1 2 3 4 @MAX ]
+DW [ ]
 .data__vtable_under_or_under_something
-DW [ .func__fib ]
+DW [ ]
 .func__fib
 LLOD $1 SP 1
 BRE .label__fib__base_under_case $1 0
 BRE .label__fib__base_under_case $1 1
-MOV $2 1
-SUB $2 $1 $2
+SUB $2 $1 1
 PSH $1
 PSH $2
 CAL .func__fib
 ADD SP SP 1
 POP $2
-MOV $3 2
-SUB $3 $2 $3
+SUB $2 $2 2
 PSH $1
-PSH $3
+PSH $2
 CAL .func__fib
 ADD SP SP 1
 POP $2
-ADD $1 $2 $1
+ADD $2 $2 $1
+MOV $1 $2
 RET
 .label__fib__base_under_case
 RET

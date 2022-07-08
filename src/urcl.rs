@@ -1,5 +1,8 @@
 use super::*;
-use std::fmt::{self, Display, Formatter, Result};
+use std::{
+    collections::HashSet,
+    fmt::{self, Display, Formatter, Result},
+};
 
 pub struct InstructionEntry<'a> {
     pub instruction: Instruction<'a>,
@@ -45,7 +48,6 @@ impl Display for Instruction<'_> {
 pub enum Register<'a> {
     Index(usize),
     Named(&'a str),
-    Input(&'a str),
 }
 
 impl Display for Register<'_> {
@@ -53,20 +55,41 @@ impl Display for Register<'_> {
         match self {
             Self::Index(idx) => write!(f, "${idx}"),
             Self::Named(name) => write!(f, "&{name}"),
-            Self::Input(name) => write!(f, "<{name}>"),
         }
     }
 }
 
-pub struct StackBindings<'a>(Vec<Register<'a>>);
+#[derive(Clone, Copy)]
+pub enum InputRegister<'a> {
+    Owned(Register<'a>),
+    Shared(Register<'a>),
+}
 
-impl StackBindings<'_> {
+impl Display for InputRegister<'_> {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match self {
+            Self::Owned(reg) => write!(f, "{reg}"),
+            Self::Shared(reg) => write!(f, "<{reg}>"),
+        }
+    }
+}
+
+pub struct InputStackBindings<'a>(Vec<InputRegister<'a>>);
+pub struct OutputStackBindings<'a>(Vec<Register<'a>>);
+
+impl InputStackBindings<'_> {
     pub fn len(&self) -> usize {
         self.0.len()
     }
 }
 
-impl Display for StackBindings<'_> {
+impl OutputStackBindings<'_> {
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl Display for InputStackBindings<'_> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         self.0.iter().fold(Ok(()), |result, reg| {
             result.and_then(|()| write!(f, " {reg}"))
@@ -74,17 +97,46 @@ impl Display for StackBindings<'_> {
     }
 }
 
-impl Default for StackBindings<'_> {
+impl Display for OutputStackBindings<'_> {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        self.0.iter().fold(Ok(()), |result, reg| {
+            result.and_then(|()| write!(f, " {reg}"))
+        })
+    }
+}
+
+impl Default for OutputStackBindings<'_> {
     fn default() -> Self {
         Self(vec![])
     }
 }
 
-pub fn parse_stack_bindings<'a>(
+pub fn parse_input_stack_bindings<'a>(
     nodes: impl Iterator<Item = Node<'a>>,
     unit: &'a CompilationUnit<'a>,
-) -> StackBindings<'a> {
-    StackBindings(nodes.map(|node| parse_register(node, unit)).collect())
+) -> (InputStackBindings<'a>, Vec<SourceError<'a>>) {
+    let mut errors = Vec::new();
+    let mut bound = HashSet::new();
+    let bindings = InputStackBindings(
+        nodes
+            .map(|node| match parse_input_register(node, unit) {
+                input @ InputRegister::Owned(reg) | input @ InputRegister::Shared(reg) => {
+                    if reg != Register::Index(0) && !bound.insert(reg) {
+                        err!(errors; unit; node, "Duplicate input register binding (note: bind to $0 to discard an input value)");
+                    }
+                    input
+                }
+            })
+            .collect(),
+    );
+    (bindings, errors)
+}
+
+pub fn parse_output_stack_bindings<'a>(
+    nodes: impl Iterator<Item = Node<'a>>,
+    unit: &'a CompilationUnit<'a>,
+) -> OutputStackBindings<'a> {
+    OutputStackBindings(nodes.map(|node| parse_register(node, unit)).collect())
 }
 
 #[derive(Clone, Copy)]
@@ -141,28 +193,45 @@ fn parse_source<'a>(
     headers: &Headers,
     node: Node<'a>,
     unit: &'a CompilationUnit<'a>,
-) -> Source<'a> {
-    match node.kind() {
+) -> (Source<'a>, Vec<SourceError<'a>>) {
+    let mut errors = Vec::new();
+    let source = match node.kind() {
         "index_register" | "named_register" | "input_register" => {
             Source::Register(parse_register(node, unit))
         }
-        _ => Source::Literal(lower_literal(args, headers, parse_literal(node, unit))),
-    }
+        _ => Source::Literal(
+            lower_literal(
+                args,
+                headers,
+                parse_literal(node, unit).extend_into(&mut errors),
+                node,
+                unit,
+            )
+            .extend_into(&mut errors),
+        ),
+    };
+    (source, errors)
 }
 
 fn parse_register<'a>(node: Node<'a>, unit: &'a CompilationUnit<'a>) -> Register<'a> {
     match node.kind() {
         "index_register" => Register::Index(node.field("index", unit).text(unit).parse().unwrap()),
         "named_register" => Register::Named(node.field("name", unit).text(unit)),
-        "input_register" => Register::Input(node.field("name", unit).text(unit)),
         _ => unknown_node(node, unit),
+    }
+}
+
+fn parse_input_register<'a>(node: Node<'a>, unit: &'a CompilationUnit<'a>) -> InputRegister<'a> {
+    match node.kind() {
+        "input_register" => InputRegister::Shared(parse_register(node.field("reg", unit), unit)),
+        _ => InputRegister::Owned(parse_register(node, unit)),
     }
 }
 
 pub fn parse_instructions<'a>(
     args: &Args,
     headers: &Headers,
-    node: Node<'a>,
+    nodes: impl Iterator<Item = Node<'a>>,
     func_name: &'a str,
     branch_destination: Option<&'a str>,
     unit: &'a CompilationUnit<'a>,
@@ -170,10 +239,7 @@ pub fn parse_instructions<'a>(
     let mut errors = Vec::new();
     let mut instructions = Vec::<InstructionEntry<'a>>::new();
     let mut labels = HashMap::<&'a str, usize>::new();
-    for inst in node
-        .children_by_field_name("instruction", &mut unit.tree.walk())
-        .collect::<Vec<_>>()
-    {
+    for inst in nodes {
         for label in
             inst.children_by_field_name("label", &mut unit.tree.walk())
                 .map(|node| {
@@ -209,7 +275,8 @@ pub fn parse_instructions<'a>(
                 },
                 "urcl_out" => Instruction::Out {
                     port: &inst.field("dest", unit).field("name", unit).text(unit),
-                    source: parse_source(args, headers, inst.field("source", unit), unit),
+                    source: parse_source(args, headers, inst.field("source", unit), unit)
+                        .extend_into(&mut errors),
                 },
                 "urcl_generic" => Instruction::Generic {
                     op: inst.field("op", unit).text(unit),
@@ -226,7 +293,9 @@ pub fn parse_instructions<'a>(
                     sources: {
                         let sources = inst
                             .children_by_field_name("source", &mut unit.tree.walk())
-                            .map(|node| parse_source(args, headers, node, unit))
+                            .map(|node| {
+                                parse_source(args, headers, node, unit).extend_into(&mut errors)
+                            })
                             .collect::<Vec<Source>>();
                         if sources.is_empty() {
                             err!(errors; unit; inst, "No source operands; expected at least one??");
@@ -293,8 +362,8 @@ pub fn emit_instructions<'a>(
     instructions: &Vec<urcl::InstructionEntry<'a>>,
     branch_target: Option<(&'a str, &'a str)>,
     reg_alloc: RegisterAllocation<'a>,
-    StackBindings(input): &StackBindings<'a>,
-    StackBindings(output): &StackBindings<'a>,
+    InputStackBindings(input): &InputStackBindings<'a>,
+    OutputStackBindings(output): &OutputStackBindings<'a>,
     max_regs: &mut usize,
 ) -> io::Result<RegisterAllocation<'a>> {
     fn emit_dest(&dest: &BranchDestination, branch_target: Option<(&str, &str)>) -> String {
@@ -322,29 +391,36 @@ pub fn emit_instructions<'a>(
         let input_regs = reg_alloc.get(input.len());
         for i in 0..input.len() {
             let input = input[i];
-            if let Register::Input(_) = input {
-                regs.entry(input).or_insert_with(|| input_regs[i].clone());
-            } else if let Register::Index(0) = input {
-                // Do nothing, this always maps to the zero reg
-            } else if let AllocationSlot::Register(reg) = input_regs[i] {
-                if reg_alloc.is_reg_unique(reg) {
-                    assert!(regs.insert(input, AllocationSlot::Register(reg)).is_none());
-                } else {
-                    let next = reg_alloc.next_reg();
-                    writeln!(f, "MOV {next} {}", input_regs[i])?;
-                    regs.insert(input, next);
+            // .or_insert_with() with ensures the entries are not updated.
+            // this is only used when Index(0) is used
+            // or the user intentionally ignored errors,
+            // so it is the correct semantics i want here.
+            match input {
+                InputRegister::Shared(reg) => {
+                    regs.entry(reg).or_insert_with(|| input_regs[i].clone());
                 }
-            } else {
-                let next = reg_alloc.next_reg();
-                writeln!(f, "MOV {next} {}", input_regs[i])?;
-                regs.insert(input, next);
+                InputRegister::Owned(input_reg) => {
+                    if let AllocationSlot::Register(allocated_reg) = input_regs[i] {
+                        if reg_alloc.can_own_in_place(allocated_reg) {
+                            regs.entry(input_reg)
+                                .or_insert_with(|| AllocationSlot::Register(allocated_reg));
+                        } else {
+                            let next = reg_alloc.next_reg();
+                            writeln!(f, "MOV {next} {}", input_regs[i])?;
+                            regs.entry(input_reg).or_insert_with(|| next);
+                        }
+                    } else {
+                        let next = reg_alloc.next_reg();
+                        writeln!(f, "MOV {next} {}", input_regs[i])?;
+                        regs.entry(input_reg).or_insert_with(|| next);
+                    }
+                }
             }
         }
     }
 
     for &reg in output.iter() {
-        regs.entry(reg)
-            .or_insert_with(|| reg_alloc.next_reg());
+        regs.entry(reg).or_insert_with(|| reg_alloc.next_reg());
     }
 
     for entry in instructions {
@@ -352,8 +428,7 @@ pub fn emit_instructions<'a>(
             urcl::Instruction::In { dest, port } => writeln!(
                 f,
                 "IN {} %{port}",
-                regs.entry(*dest)
-                    .or_insert_with(|| reg_alloc.next_reg()),
+                regs.entry(*dest).or_insert_with(|| reg_alloc.next_reg()),
             )?,
             urcl::Instruction::Out { port, source } => {
                 write!(f, "OUT %{port}")?;
@@ -408,6 +483,41 @@ pub fn emit_instructions<'a>(
     Ok(reg_alloc)
 }
 
+pub fn __unary__<'a>(
+    node: Node<'a>,
+    instruction: Node<'a>,
+    unit: &'a CompilationUnit<'a>,
+) -> Vec<UrclMainBody<'a>> {
+    vec![
+        UrclMainBody {
+            input: InputStackBindings(vec![InputRegister::Shared(Register::Named("src"))]),
+            output: OutputStackBindings(vec![Register::Named("out")]),
+            pos: node.pos(unit),
+            instructions: vec![InstructionEntry {
+                pos: instruction.pos(unit),
+                instruction: Instruction::Generic {
+                    op: instruction.text(unit),
+                    dest: Destination::Register(Register::Named("out")),
+                    sources: vec![Source::Register(Register::Named("src"))],
+                },
+            }],
+        },
+        UrclMainBody {
+            input: InputStackBindings(vec![InputRegister::Owned(Register::Named("reg"))]),
+            output: OutputStackBindings(vec![Register::Named("reg")]),
+            pos: node.pos(unit),
+            instructions: vec![InstructionEntry {
+                pos: instruction.pos(unit),
+                instruction: Instruction::Generic {
+                    op: instruction.text(unit),
+                    dest: Destination::Register(Register::Named("reg")),
+                    sources: vec![Source::Register(Register::Named("reg"))],
+                },
+            }],
+        },
+    ]
+}
+
 pub fn __binary__<'a>(
     node: Node<'a>,
     instruction: Node<'a>,
@@ -415,8 +525,11 @@ pub fn __binary__<'a>(
 ) -> Vec<UrclMainBody<'a>> {
     vec![
         UrclMainBody {
-            input: StackBindings(vec![Register::Input("lhs"), Register::Input("rhs")]),
-            output: StackBindings(vec![Register::Named("out")]),
+            input: InputStackBindings(vec![
+                InputRegister::Shared(Register::Named("lhs")),
+                InputRegister::Shared(Register::Named("rhs")),
+            ]),
+            output: OutputStackBindings(vec![Register::Named("out")]),
             pos: node.pos(unit),
             instructions: vec![InstructionEntry {
                 pos: instruction.pos(unit),
@@ -424,15 +537,18 @@ pub fn __binary__<'a>(
                     op: instruction.text(unit),
                     dest: Destination::Register(Register::Named("out")),
                     sources: vec![
-                        Source::Register(Register::Input("lhs")),
-                        Source::Register(Register::Input("rhs")),
+                        Source::Register(Register::Named("lhs")),
+                        Source::Register(Register::Named("rhs")),
                     ],
                 },
             }],
         },
         UrclMainBody {
-            input: StackBindings(vec![Register::Named("lhs"), Register::Input("rhs")]),
-            output: StackBindings(vec![Register::Named("lhs")]),
+            input: InputStackBindings(vec![
+                InputRegister::Owned(Register::Named("lhs")),
+                InputRegister::Shared(Register::Named("rhs")),
+            ]),
+            output: OutputStackBindings(vec![Register::Named("lhs")]),
             pos: node.pos(unit),
             instructions: vec![InstructionEntry {
                 pos: instruction.pos(unit),
@@ -441,14 +557,17 @@ pub fn __binary__<'a>(
                     dest: Destination::Register(Register::Named("lhs")),
                     sources: vec![
                         Source::Register(Register::Named("lhs")),
-                        Source::Register(Register::Input("rhs")),
+                        Source::Register(Register::Named("rhs")),
                     ],
                 },
             }],
         },
         UrclMainBody {
-            input: StackBindings(vec![Register::Input("lhs"), Register::Named("rhs")]),
-            output: StackBindings(vec![Register::Named("rhs")]),
+            input: InputStackBindings(vec![
+                InputRegister::Shared(Register::Named("lhs")),
+                InputRegister::Owned(Register::Named("rhs")),
+            ]),
+            output: OutputStackBindings(vec![Register::Named("rhs")]),
             pos: node.pos(unit),
             instructions: vec![InstructionEntry {
                 pos: instruction.pos(unit),
@@ -456,7 +575,7 @@ pub fn __binary__<'a>(
                     op: instruction.text(unit),
                     dest: Destination::Register(Register::Named("rhs")),
                     sources: vec![
-                        Source::Register(Register::Input("lhs")),
+                        Source::Register(Register::Named("lhs")),
                         Source::Register(Register::Named("rhs")),
                     ],
                 },
@@ -471,7 +590,10 @@ pub fn __branching__<'a>(
     unit: &'a CompilationUnit<'a>,
 ) -> UrclBranchBody<'a> {
     UrclBranchBody {
-        input: StackBindings(vec![Register::Input("lhs"), Register::Input("rhs")]),
+        input: InputStackBindings(vec![
+            InputRegister::Shared(Register::Named("lhs")),
+            InputRegister::Shared(Register::Named("rhs")),
+        ]),
         pos: node.pos(unit),
         instructions: vec![InstructionEntry {
             pos: instruction.pos(unit),
@@ -479,8 +601,8 @@ pub fn __branching__<'a>(
                 op: instruction.text(unit),
                 dest: Destination::Branch(BranchDestination::BranchLabel),
                 sources: vec![
-                    Source::Register(Register::Input("lhs")),
-                    Source::Register(Register::Input("rhs")),
+                    Source::Register(Register::Named("lhs")),
+                    Source::Register(Register::Named("rhs")),
                 ],
             },
         }],

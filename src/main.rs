@@ -4,7 +4,11 @@ mod permutation;
 mod urcl;
 mod ursl;
 
+use colored::Colorize;
 pub use common::*;
+use const_format::concatcp;
+use hex_literal::hex;
+use non_empty_vec::ne_vec;
 pub use permutation::*;
 
 use clap::Parser;
@@ -18,6 +22,7 @@ use std::{
     iter,
 };
 use tree_sitter::{Node, Tree};
+use tree_sitter_highlight::{Highlight, HighlightConfiguration, HighlightEvent, Highlighter};
 
 pub trait NodeExt<'a> {
     fn pos(&self, unit: &'a CompilationUnit<'a>) -> Position<'a>;
@@ -101,23 +106,90 @@ pub struct Headers {
     minstack: usize,
 }
 
-// fuck this lint
-#[allow(non_upper_case_globals)]
-const prelude_source: &str = include_str!("prelude.ursl");
+macro_rules! colors {
+    (@value $hex:literal) => {{
+        let [r, g, b] = hex!($hex);
+        format!("\x1b[0;38;2;{r};{g};{b}m")
+    }};
+    (@value ($hex:literal underline)) => {{
+        let [r, g, b] = hex!($hex);
+        format!("\x1b[4;38;2;{r};{g};{b}m")
+    }};
+    (@value ($hex:literal bold)) => {{
+        let [r, g, b] = hex!($hex);
+        format!("\x1b[1;38;2;{r};{g};{b}m")
+    }};
+    ($(($a:expr, $b:expr),)*) => {
+        (&[$($a),*], &[$($b),*])
+    };
+    ($($k:expr => $v:tt,)*) => {
+        (&[$($k),*], &[$(colors!(@value $v)),*])
+    };
+}
 
 fn main() -> io::Result<()> {
     let mut cli = CliArgs::parse();
     if cli.args.emit_chars_as_numbers {
         cli.args.emit_chars_literally = true;
     }
-    let source = &fs::read_to_string(&cli.input)?;
+    let main_source = &fs::read_to_string(&cli.input)?;
 
     let parser = &mut tree_sitter::Parser::new();
     parser
         .set_language(tree_sitter_ursl::language())
         .expect("Failed to set language. For sure unreachable.");
-    let prelude = CompilationUnit::new("<prelude>", prelude_source, parser);
-    let main = CompilationUnit::new(&cli.input, source, parser);
+    let highlight_config = &mut HighlightConfiguration::new(
+        tree_sitter_ursl::language(),
+        concatcp!("(ERROR) @error\n", tree_sitter_ursl::HIGHLIGHTS_QUERY),
+        "",
+        "",
+    )
+    .unwrap();
+    let (recognized_names, formats) = colors![
+        "ERROR" => ("FF0000" underline),
+        "comment" => "6A9955",
+        "number" => "B5CEA8",
+        "port" => "4EC9B0",
+        "label" => "DCDCAA",
+        "label.data" => "DCDCAA",
+        "function" => "DCDCAA",
+        "macro" => "C586C0",
+        "address" => "4FC1FF",
+        "register" => "9CDCFE",
+        "register.special" => ("9CDCFE" bold),
+        "string" => "CE9178",
+        "string.special" => "D7BA7D",
+        "instruction" => "569CD6",
+        "property" => "CD3131",
+        "keyword" => "C586C0",
+        "punctuation.delimiter" => "666666",
+        "punctuation.bracket" => "666666",
+    ];
+    highlight_config.configure(recognized_names);
+    let highligher = &mut Highlighter::new();
+    let prelude = CompilationUnit::new(
+        if cfg!(debug_assertions) {
+            // This is useful for debugging errors in the prelude
+            "src/prelude.ursl"
+        } else {
+            // But outside of writing the compiler, the internal path to
+            // the prelude makes no sense to expose when in release mode
+            "<prelude>"
+        },
+        include_str!("prelude.ursl"),
+        parser,
+        highligher,
+        highlight_config,
+        formats,
+    );
+    let main = CompilationUnit::new(
+        &cli.input,
+        main_source,
+        parser,
+        highligher,
+        highlight_config,
+        formats,
+    );
 
     let headers = parse_headers(
         main.tree
@@ -126,21 +198,27 @@ fn main() -> io::Result<()> {
         &main,
     );
 
-    let (result, errors) = compile(&cli.args, headers, &[&prelude, &main]);
+    let units = &[&prelude, &main];
+
+    let (result, errors) = compile(&cli.args, headers, units);
 
     if !errors.is_empty() {
-        let max_line_no_width = source.lines().count().to_string().len();
+        let max_line_no_width = units
+            .iter()
+            .map(|unit| unit.source.lines().count().to_string().len())
+            .max()
+            .unwrap_or_default();
         let err_count = errors.len();
         eprintln!();
         for SourceError { pos, message } in errors {
             if let Some(pos) = pos {
-                eprintln!("{:>>max_line_no_width$} {pos}", "");
+                eprintln!(
+                    "{} {pos}",
+                    format!("{:>>max_line_no_width$}", "").cyan().bold()
+                );
                 if pos.range.start_point.row == pos.range.end_point.row {
-                    let row = pos.range.start_point.row + 1;
-                    let line = source
-                        .lines()
-                        .nth(pos.range.start_point.row)
-                        .expect("Error printing errors");
+                    let row = pos.range.start_point.row;
+                    let line = pos.unit.highlighted_source[row].as_str();
                     let start = pos.range.start_point.column;
                     let end = pos.range.end_point.column;
                     let err_pointer: String = iter::repeat(' ')
@@ -148,26 +226,41 @@ fn main() -> io::Result<()> {
                         .chain(iter::repeat('^'))
                         .take(end)
                         .collect();
-                    eprintln!("{row:>max_line_no_width$} | {line}");
-                    eprintln!("{spc:>max_line_no_width$}   {err_pointer}", spc = ' ');
+                    eprintln!(
+                        "{} {line}",
+                        format!("{: >max_line_no_width$} |", row + 1)
+                            .bright_black()
+                            .bold(),
+                    );
+                    eprintln!("{:>max_line_no_width$}   {}", "", err_pointer.red().bold());
                 } else {
-                    let lines = source
-                        .lines()
+                    let lines = pos
+                        .unit
+                        .highlighted_source
+                        .iter()
                         .enumerate()
                         .skip(pos.range.start_point.row)
                         .take(pos.range.end_point.row - pos.range.start_point.row);
                     for (row, line) in lines {
-                        let row = row + 1;
-                        eprintln!("{row:>max_line_no_width$} | {line}");
+                        eprintln!(
+                            "{} {line}",
+                            format!("{: >max_line_no_width$} |", row + 1)
+                                .bright_black()
+                                .bold(),
+                        );
                     }
                 }
-                eprintln!("{:<<max_line_no_width$} {message}", "");
+                eprintln!(
+                    "{} {}",
+                    format!("{:<<max_line_no_width$}", "").cyan().bold(),
+                    message.red().bold()
+                );
             } else {
-                eprintln!("{message}");
+                eprintln!("{}", message.red().bold());
             }
             eprintln!();
         }
-        eprintln!("{err_count} errors");
+        eprintln!("{}", format!("{err_count} errors").red().bold());
         if cli.fuck_it {
             eprintln!("The partial data that the compiler has will now be emitted as if nothing went wrong.");
             eprintln!("This will likely panic.");
@@ -187,22 +280,72 @@ fn main() -> io::Result<()> {
 
 struct CompileResult<'a> {
     headers: Headers,
-    defs: Vec<(&'a str, DefValue<'a>)>,
+    defs: Vec<(&'a str, DataLiteral<'a>)>,
     functions: BTreeMap<&'a str, Function<'a>>,
 }
 
 pub struct CompilationUnit<'a> {
     path: &'a str,
     source: &'a str,
+    highlighted_source: Vec<String>,
     tree: Tree,
 }
 
 impl<'a> CompilationUnit<'a> {
-    pub fn new(path: &'a str, source: &'a str, parser: &mut tree_sitter::Parser) -> Self {
+    pub fn new(
+        path: &'a str,
+        source: &'a str,
+        parser: &mut tree_sitter::Parser,
+        highlighter: &mut Highlighter,
+        highlight_config: &HighlightConfiguration,
+        formats: &[impl AsRef<str>],
+    ) -> Self {
         let tree = parser
             .parse(source, None)
             .unwrap_or_else(|| panic!("Parsing fucked up real bad in {path}. Didn't even give me a syntax tree. This should be impossible."));
-        CompilationUnit { path, source, tree }
+        let mut highlighted_source = Vec::new();
+        let mut last_line = String::new();
+        let mut colors = ne_vec!["\x1b[0m"];
+
+        for event in highlighter
+            .highlight(highlight_config, source.as_bytes(), None, |_| None)
+            .unwrap()
+            .map(Result::unwrap)
+        {
+            match event {
+                HighlightEvent::HighlightStart(Highlight(u)) => {
+                    colors.push(formats[u].as_ref());
+                    last_line.push_str(colors.last());
+                }
+                HighlightEvent::Source { start, end } => {
+                    let source = &source[start..end];
+                    let (first, rest) = source
+                        .split_once('\n')
+                        .map(|(first, rest)| (first, Some(rest)))
+                        .unwrap_or((source, None));
+                    last_line.push_str(first);
+                    if let Some(rest) = rest {
+                        for line in rest.split('\n') {
+                            highlighted_source.push(last_line);
+                            last_line = String::new();
+                            last_line.push_str(colors.last());
+                            last_line.push_str(line);
+                        }
+                    }
+                }
+                HighlightEvent::HighlightEnd => {
+                    colors.pop();
+                    last_line.push_str(colors.last());
+                }
+            }
+        }
+        highlighted_source.push(last_line);
+        CompilationUnit {
+            path,
+            source,
+            tree,
+            highlighted_source,
+        }
     }
 }
 
@@ -212,7 +355,7 @@ fn compile<'a>(
     units: &[&'a CompilationUnit<'a>],
 ) -> (CompileResult<'a>, Vec<SourceError<'a>>) {
     let mut errors = Vec::new();
-    let mut defs = Vec::<(&str, DefValue)>::new();
+    let mut defs = Vec::new();
     let mut functions = BTreeMap::new();
     let mut signatures = HashMap::new();
     for unit in units {
@@ -222,27 +365,20 @@ fn compile<'a>(
             .children_by_field_name("data", &mut unit.tree.walk())
         {
             let label = node.field("label", unit).field("name", unit).text(unit);
-            let value_node = node.field("value", unit);
-            let value: DefValue = match value_node.kind() {
-                "array" => DefValue::Array(
-                    value_node
-                        .children_by_field_name("items", &mut unit.tree.walk())
-                        .map(|node| lower_literal(&args, &headers, parse_literal(node, unit)))
-                        .collect(),
-                ),
-                _ => DefValue::Single(lower_literal(
-                    args,
-                    &headers,
-                    parse_literal(value_node, unit),
-                )),
-            };
-            defs.push((label, value));
+            defs.push((
+                label,
+                parse_data_literal(node.field("value", unit), unit).extend_into(&mut errors),
+            ));
         }
 
         if args.verbose {
+            println!();
+            println!("=== Declarations after parsing {} ===", unit.path);
+            println!();
             for (label, val) in &defs {
                 println!(".{label} {val}");
             }
+            println!();
         }
 
         errors.extend(parse_functions(
@@ -255,6 +391,12 @@ fn compile<'a>(
             &mut signatures,
             unit,
         ));
+    }
+
+    for func in functions.values() {
+        if let FunctionBody::Deferred = func.body {
+            err!(errors; func.unit; func.node, "function {} is declared, but never given a body. Declare it with extern \"URSL\" if this is intentional", func.name);
+        }
     }
 
     if args.no_main {
@@ -397,45 +539,86 @@ fn parse_functions<'a>(
 
     for node in funcs {
         match node.kind() {
-            "func" => {
+            "deferred_func" => {
+                let name = node.field("name", unit).text(unit);
                 let stack = parse_stack_sig(node, unit);
-                let locals = parse_locals(node, unit);
-                let name = node.field("name", unit).text(unit); // don't trim $, that way it doesn't collide with insts
-                functions.insert(
-                    name,
-                    Function {
-                        node,
+                if let Some(f) = functions.get(&name) {
+                    if f.stack != stack {
+                        err!(errors; unit; node, "Conflicting stack behaviour, previously defined at {} with ({}), but here has ({})", f.pos, f.stack, stack);
+                    }
+                } else {
+                    functions.insert(
                         name,
-                        stack,
-                        body: FunctionBody::Ursl {
-                            locals,
-                            instructions: Vec::new(),
+                        Function {
+                            node,
+                            name,
+                            stack,
+                            body: FunctionBody::Deferred,
+                            pos: node.pos(unit),
+                            unit,
                         },
-                        pos: node.pos(unit),
-                        unit,
+                    );
+                    signatures.insert(name, (stack, false));
+                }
+            }
+            "extern_func" => {}
+            "func" => {
+                let head = node.field("head", unit);
+                let stack = parse_stack_sig(head, unit);
+                let locals = parse_locals(head, unit);
+                let name = head.field("name", unit).text(unit); // don't trim $, that way it doesn't collide with insts
+                let new_func = Function {
+                    node,
+                    name,
+                    stack,
+                    body: FunctionBody::Ursl {
+                        locals,
+                        instructions: Vec::new(),
                     },
-                );
-                signatures.insert(name, (stack, false));
+                    pos: head.pos(unit),
+                    unit,
+                };
+                if let Some(old_func) = functions.get_mut(name) {
+                    match old_func.body {
+                        FunctionBody::Deferred => {
+                            if old_func.stack != new_func.stack {
+                                err!(errors; unit; node, "Conflicting stack behaviour, previously defined at {} with ({}), but here has ({})", old_func.pos, old_func.stack, new_func.stack);
+                            } else {
+                                old_func.body = new_func.body;
+                                old_func.pos = new_func.pos;
+                                old_func.unit = new_func.unit;
+                            }
+                        }
+                        _ => {
+                            err!(errors; unit; head, "Duplicate func `{name}`, previously defined at {}", old_func.pos)
+                        }
+                    }
+                } else {
+                    functions.insert(name, new_func);
+                    signatures.insert(name, (stack, false));
+                }
                 instruction_nodes.insert(name, node);
             }
             "inst" => {
-                let name = node.field("name", unit).text(unit);
+                let head = node.field("head", unit);
+                let name = head.field("name", unit).text(unit);
                 if ["halt", "ret"].contains(&name) {
-                    err!(errors; unit; node.field("name", unit), "inst {name} is also defined as intrinsic");
+                    err!(errors; unit; head.field("name", unit), "inst {name} is also defined as intrinsic");
                 }
-                let input = urcl::parse_stack_bindings(
-                    node.children_by_field_name("input", &mut unit.tree.walk()),
+                let input = urcl::parse_input_stack_bindings(
+                    head.children_by_field_name("input", &mut unit.tree.walk()),
                     unit,
-                );
-                let output = urcl::parse_stack_bindings(
-                    node.children_by_field_name("output", &mut unit.tree.walk()),
+                )
+                .extend_into(&mut errors);
+                let output = urcl::parse_output_stack_bindings(
+                    head.children_by_field_name("output", &mut unit.tree.walk()),
                     unit,
                 );
                 let stack = stack!(input.len(); -> output.len());
                 let instructions = urcl::parse_instructions(
                     args,
                     headers,
-                    node.field("instructions", unit),
+                    node.children_by_field_name("instruction", &mut unit.tree.walk()),
                     name,
                     None,
                     unit,
@@ -445,7 +628,7 @@ fn parse_functions<'a>(
                     input,
                     output,
                     instructions,
-                    pos: node.pos(unit),
+                    pos: head.pos(unit),
                 };
                 if let Some(Function {
                     node: _,
@@ -461,21 +644,12 @@ fn parse_functions<'a>(
                         branch: _,
                     } = f_body
                     {
-                        if old_stack.input != stack.input {
-                            err!(errors; unit; node,
-                                "inst {name} is defined with a different signature than before. Here it has {} input items, but before it had {} input items. Previous definition at {old_pos}",
-                                stack.input, old_stack.input,
-                            );
-                        }
-                        if old_stack.output != stack.output {
-                            err!(errors; unit; node,
-                                "inst {name} is defined with a different signature than before. Here it has {} output items, but before it had {} output items. Previous definition at {old_pos}",
-                                stack.output, old_stack.output,
-                            );
+                        if stack != *old_stack {
+                            err!(errors; unit; head, "Conflicting stack behaviour, previously defined at {} with ({}), but here has ({})", old_pos, old_stack, stack);
                         }
                         overloads.push(body);
                     } else {
-                        err!(errors; unit; node, "inst {name} is also defined at {old_pos}");
+                        err!(errors; unit; head, "inst {name} is also defined at {old_pos}");
                     }
                 } else {
                     functions.insert(
@@ -488,7 +662,7 @@ fn parse_functions<'a>(
                                 overloads: vec![body],
                                 branch: None,
                             },
-                            pos: node.pos(unit),
+                            pos: head.pos(unit),
                             unit,
                         },
                     );
@@ -496,20 +670,22 @@ fn parse_functions<'a>(
                 }
             }
             "inst_branch" => {
-                let name = node.field("name", unit).text(unit);
+                let head = node.field("head", unit);
+                let name = head.field("name", unit).text(unit);
                 if ["halt", "ret"].contains(&name) {
-                    err!(errors; unit; node.field("name", unit), "inst {name} is also defined as intrinsic");
+                    err!(errors; unit; head.field("name", unit), "inst {name} is also defined as intrinsic");
                 }
-                let input = urcl::parse_stack_bindings(
-                    node.children_by_field_name("input", &mut unit.tree.walk()),
+                let input = urcl::parse_input_stack_bindings(
+                    head.children_by_field_name("input", &mut unit.tree.walk()),
                     unit,
-                );
-                let branch_destination = &node.field("label", unit).field("name", unit).text(unit);
+                )
+                .extend_into(&mut errors);
+                let branch_destination = &head.field("label", unit).field("name", unit).text(unit);
                 let stack = stack!(input.len(); -> 1);
                 let instructions = urcl::parse_instructions(
                     args,
                     headers,
-                    node.field("instructions", unit),
+                    node.children_by_field_name("instruction", &mut unit.tree.walk()),
                     name,
                     Some(branch_destination),
                     unit,
@@ -518,7 +694,7 @@ fn parse_functions<'a>(
                 let branch = UrclBranchBody {
                     input,
                     instructions,
-                    pos: node.pos(unit),
+                    pos: head.pos(unit),
                 };
                 if let Some(Function {
                     node: _,
@@ -535,25 +711,25 @@ fn parse_functions<'a>(
                     } = f_body
                     {
                         if old_stack.input != stack.input {
-                            err!(errors; unit; node,
+                            err!(errors; unit; head,
                                 "branch {name} is defined with a different signature than before. Here it has {} input items, but before it had {} input items. Previous definition at {old_pos}",
                                 stack.input, old_stack.input,
                             );
                         }
                         if old_stack.output != stack.output {
-                            err!(errors; unit; node,
+                            err!(errors; unit; head,
                                 "branch {name} is defined with a different signature than before. Here it has {} output items, but before it had {} output items. Previous definition at {old_pos}",
                                 stack.output, old_stack.output,
                             );
                         }
                         if let Some(old_branch) = branch_body.replace(branch) {
-                            err!(errors; unit; node,
+                            err!(errors; unit; head,
                                 "branch {name} is also defined at {}", old_branch.pos);
                         } else {
                             signatures.get_mut(name).unwrap().1 = true;
                         }
                     } else {
-                        err!(errors; unit; node, "inst {name} is also defined at {old_pos}");
+                        err!(errors; unit; head, "inst {name} is also defined at {old_pos}");
                     }
                 } else {
                     functions.insert(
@@ -566,7 +742,7 @@ fn parse_functions<'a>(
                                 overloads: vec![],
                                 branch: Some(branch),
                             },
-                            pos: node.pos(unit),
+                            pos: head.pos(unit),
                             unit,
                         },
                     );
@@ -579,11 +755,7 @@ fn parse_functions<'a>(
                     err!(errors; unit; node.field("name", unit), "inst {name} is also defined as intrinsic");
                 }
                 if let Some(f) = functions.get(&name) {
-                    panic!(
-                        "inst {name} at {} is also defined at {}",
-                        node.pos(unit),
-                        f.pos
-                    );
+                    err!(errors; unit; node, "inst {name} is also defined at {}", f.pos);
                 }
                 let perm = parse_permutation_sig(node.field("permutation", unit), unit)
                     .extend_into(&mut errors);
@@ -600,6 +772,25 @@ fn parse_functions<'a>(
                     },
                 );
                 signatures.insert(name, (stack, false));
+            }
+            "dunder_unary" => {
+                let name = node.field("name", unit).text(unit);
+                let instruction = node.field("instruction", unit);
+                functions.insert(
+                    name,
+                    Function {
+                        node,
+                        name,
+                        stack: stack!(1; -> 1),
+                        body: FunctionBody::Urcl {
+                            overloads: urcl::__unary__(node, instruction, unit),
+                            branch: None,
+                        },
+                        pos: node.pos(unit),
+                        unit,
+                    },
+                );
+                signatures.insert(name, (stack!(1; -> 1), false));
             }
             "dunder_binary" => {
                 let name = node.field("name", unit).text(unit);
@@ -646,24 +837,45 @@ fn parse_functions<'a>(
 
     for func in functions.values_mut() {
         match &mut func.body {
+            FunctionBody::Deferred => {
+                if args.verbose {
+                    println!("(deferred) func {} {};", func.name, func.stack);
+                }
+            }
+            FunctionBody::Extern(convention, label) => {
+                if args.verbose {
+                    println!(
+                        "extern \"{}\" func {} {} = {}\n",
+                        match convention {
+                            CallingConvention::URSL => "URSL",
+                            CallingConvention::URCLpp => "URCL++",
+                        },
+                        func.name,
+                        func.stack,
+                        label
+                    );
+                }
+            }
             FunctionBody::Ursl {
                 locals,
                 instructions,
             } => {
                 let locals = *locals;
-                let node = instruction_nodes.remove(func.name).unwrap();
-                errors.extend(ursl::parse_instructions(
-                    args,
-                    headers,
-                    &signatures,
-                    node.children_by_field_name("instructions", &mut unit.tree.walk())
-                        .collect(),
-                    func.name,
-                    func.stack.input + locals,
-                    func.stack.output,
-                    instructions,
-                    unit,
-                ));
+                // Should be `None` if the instruction is defined in an earlier compilation unit
+                if let Some(node) = instruction_nodes.remove(func.name) {
+                    errors.extend(ursl::parse_instructions(
+                        args,
+                        headers,
+                        &signatures,
+                        node.children_by_field_name("instructions", &mut unit.tree.walk())
+                            .collect(),
+                        func.name,
+                        func.stack.input + locals,
+                        func.stack.output,
+                        instructions,
+                        unit,
+                    ));
+                }
                 if args.verbose {
                     println!("func {} : {} + {locals} {{", func.name, func.stack);
                     for entry in instructions {
@@ -676,7 +888,7 @@ fn parse_functions<'a>(
                             _ => (),
                         }
                     }
-                    println!("}}\n");
+                    println!("}}");
                 }
             }
             FunctionBody::Urcl { overloads, branch } => {
@@ -717,6 +929,9 @@ fn parse_functions<'a>(
                     println!("inst {} {perm}", func.name);
                 }
             }
+        }
+        if args.verbose {
+            println!();
         }
     }
     errors

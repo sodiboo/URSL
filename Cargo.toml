@@ -6,8 +6,13 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tree-sitter = "0.20.6"
+colored = "2.0.0"
+const_format = "0.2.24"
+hex-literal = "0.3.4"
+non-empty-vec = "0.2.3"
 num = "0.4.0"
+tree-sitter = "0.20.6"
+tree-sitter-highlight = "0.20.1"
 
 [dependencies.tree-sitter-ursl]
 git = "https://github.com/Terrain2/tree-sitter-ursl"
