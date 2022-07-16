@@ -90,13 +90,25 @@ pub enum FunctionBody<'a> {
         branch: Option<UrclBranchBody<'a>>,
     },
     Permutation(Permutation),
-    Extern(CallingConvention, &'a str),
+    Extern(CallingConvention, Cow<'a, str>),
     Deferred,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CallingConvention {
     URSL,
     URCLpp,
+    Hexagn,
+}
+
+impl Display for CallingConvention {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            CallingConvention::URSL => write!(f, "URSL"),
+            CallingConvention::URCLpp => write!(f, "URCL++"),
+            CallingConvention::Hexagn => write!(f, "Hexagn"),
+        }
+    }
 }
 
 pub struct UrclMainBody<'a> {
@@ -387,6 +399,16 @@ impl<'a> RegisterAllocation<'a> {
         }
     }
 
+    pub fn offset_except(&mut self, offset: usize, dont_offset: usize) {
+        for reg in self.0.iter_mut() {
+            if let AllocationSlot::Register(reg) = reg {
+                if *reg != dont_offset {
+                    *reg += offset;
+                }
+            }
+        }
+    }
+
     pub fn pop(&mut self, length: usize) {
         for _ in 0..length {
             self.0.pop();
@@ -650,7 +672,7 @@ impl Debug for SyntaxString<'_> {
     }
 }
 
-fn parse_string<'a>(
+pub fn parse_string<'a>(
     node: Node<'a>,
     unit: &'a CompilationUnit<'a>,
 ) -> (SyntaxString<'a>, Vec<SourceError<'a>>) {
@@ -671,4 +693,38 @@ fn parse_string<'a>(
         })
         .collect();
     (SyntaxString(segments), errors)
+}
+
+pub fn parse_call_convention<'a>(
+    node: Node<'a>,
+    unit: &'a CompilationUnit<'a>,
+) -> (CallingConvention, Vec<SourceError<'a>>) {
+    let mut errors = Vec::new();
+    let convention = match parse_string(node, unit)
+        .extend_into(&mut errors)
+        .to_string()
+        .as_str()
+    {
+        "URSL" => CallingConvention::URSL,
+        "URCL++" => CallingConvention::URCLpp,
+        "Hexagn" => CallingConvention::Hexagn,
+        unknown => match unknown.to_lowercase().as_str() {
+            "ursl" => err!(
+                errors; unit; node; CallingConvention::URSL,
+                "Unknown calling convention: \"{unknown}\" (did you mean \"URSL\"?)"
+            ),
+            "urcl++" | "urclpp" => err!(
+                errors; unit; node; CallingConvention::URCLpp,
+                "Unknown calling convention: \"{unknown}\" (did you mean \"URCL++\"?)"
+            ),
+            "hexagn" => err!(
+                errors; unit; node; CallingConvention::Hexagn,
+                "Unknown calling convention: \"{unknown}\" (did you mean \"Hexagn\"?)"
+            ),
+            _ => {
+                err!(errors; unit; node; CallingConvention::URSL, "Unknown calling convention: \"{unknown}\"")
+            }
+        },
+    };
+    (convention, errors)
 }

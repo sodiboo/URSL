@@ -46,7 +46,7 @@ __unary__ not -> NOT;
 
 branch bool <&src> -> :dest { BNZ :dest &src }
 // this is comparing to @MAX because it's bitwise NOT, and not logical NOT
-// for logical NOT, that would be `bool not`, which *is* equivalent for the trivial 0 or @MAX case
+// for logical NOT, that would be `bool not`, which is equivalent for the trivial 0 or @MAX case
 branch not <&src> -> :dest { BNE :dest &src @MAX }
 
 __binary__ xor -> XOR;

@@ -14,6 +14,7 @@ pub use permutation::*;
 use clap::Parser;
 use num::Num;
 use std::{
+    borrow::Cow,
     cmp::Ordering,
     collections::{BTreeMap, HashMap},
     fmt::Debug,
@@ -43,15 +44,13 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
 
     fn field(&self, name: &str, unit: &'a CompilationUnit<'a>) -> Self {
-        self.child_by_field_name(name)
-            // breaks "expect" convention, but this is also expected to be None very often, so the panic message should be user-facing
-            .unwrap_or_else(|| {
-                panic!(
-                    "Badly formatted syntax tree; expected a field `{name}` as child of `{}` at {}",
-                    self.kind(),
-                    self.pos(unit)
-                )
-            })
+        self.child_by_field_name(name).unwrap_or_else(|| {
+            panic!(
+                "Syntax Error: expected a field `{name}` as child of `{}` at {}",
+                self.kind(),
+                self.pos(unit)
+            )
+        })
     }
 }
 
@@ -556,7 +555,64 @@ fn parse_functions<'a>(
                     signatures.insert(name, (stack, false));
                 }
             }
-            "extern_func" => {}
+            "extern_func" => {
+                let name = node.field("name", unit).text(unit);
+                let stack = parse_stack_sig(node, unit);
+                let call_convention =
+                    parse_call_convention(node.field("call_convention", unit), unit)
+                        .extend_into(&mut errors);
+                let label = node
+                    .child_by_field_name("label")
+                    .map(|label| label.field("name", unit).text(unit));
+
+                let label: Cow<'_, str> = if let Some(label) = label {
+                    if label.contains('.') {
+                        err!(errors; unit; node, "Raw label name must not contain a dot ('.')");
+                    }
+                    label.into()
+                } else {
+                    match call_convention {
+                        CallingConvention::URSL => mangle::function_name(name).into(),
+                        CallingConvention::URCLpp => name.into(),
+                        CallingConvention::Hexagn => {
+                            err!(errors; unit; node; name.into(), "Hexagn name mangling is not supported")
+                        }
+                    }
+                };
+
+                if call_convention == CallingConvention::Hexagn && stack.output > 1 {
+                    err!(errors; unit; node, "Hexagn only supports single word returns. Stop.");
+                }
+
+                let new_func = Function {
+                    node,
+                    name,
+                    stack,
+                    body: FunctionBody::Extern(call_convention, label),
+                    pos: node.pos(unit),
+                    unit,
+                };
+
+                if let Some(old_func) = functions.get_mut(name) {
+                    match old_func.body {
+                        FunctionBody::Deferred => {
+                            if old_func.stack != new_func.stack {
+                                err!(errors; unit; node, "Conflicting stack behaviour, previously defined at {} with ({}), but here has ({})", old_func.pos, old_func.stack, new_func.stack);
+                            } else {
+                                old_func.body = new_func.body;
+                                old_func.pos = new_func.pos;
+                                old_func.unit = new_func.unit;
+                            }
+                        }
+                        _ => {
+                            err!(errors; unit; node, "Duplicate func `{name}`, previously defined at {}", old_func.pos)
+                        }
+                    }
+                } else {
+                    functions.insert(name, new_func);
+                    signatures.insert(name, (stack, false));
+                }
+            }
             "func" => {
                 let head = node.field("head", unit);
                 let stack = parse_stack_sig(head, unit);
@@ -841,10 +897,7 @@ fn parse_functions<'a>(
                 if args.verbose {
                     println!(
                         "extern \"{}\" func {} {} = {}\n",
-                        match convention {
-                            CallingConvention::URSL => "URSL",
-                            CallingConvention::URCLpp => "URCL++",
-                        },
+                        convention,
                         func.name,
                         func.stack,
                         label
@@ -862,7 +915,7 @@ fn parse_functions<'a>(
                         args,
                         headers,
                         &signatures,
-                        node.children_by_field_name("instructions", &mut unit.tree.walk())
+                        node.children_by_field_name("instruction", &mut unit.tree.walk())
                             .collect(),
                         func.name,
                         func.stack.input + locals,

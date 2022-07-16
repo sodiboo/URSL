@@ -7,29 +7,32 @@ minheap 0
 .num 0x20
 .nums [ 1 2 3 4 /* ... */ @MAX ]
 .vtable_or_something [ $fib ]
-.sorry_unicode_ive_been_a_bad_boy_uwu "This is illegal on so many levels lmao: \u{D800} a"
 
 // inst swap [a b] -> [b a]
 
-// func $main {
-//     const 20
-//     const $fib
-//     perm [a b] -> [b a]
-//     icall 1 -> 1
-//     out %NUMB
-// }
+func $main {
+    const 20
+    const $fib
+    perm [a b] -> [b a]
+    extern "Hexagn" icall 1 -> 1
+    out %NUMB
+}
 
-func $fib 1 -> 1 {
+// return a constant 0 in the first slot because this should make it compatible with Hexagn
+// PLEASE DO NOT DO THIS IT IS JUST FOR TESTING MY CODE, THIS IS THE HACKIEST WAY TO CREATE EXTERN FUNCTIONS FFS
+func $fib 1 -> 2 {
+    const 0
+
     get 0
     dup  const 0  eq branch :base_case
     dup  const 1  eq branch :base_case
 
-      dup  const 1  sub call $p_fib
-      swap  const 2  sub call $p_fib
+      dup  const 1  sub call $fib  swap pop
+      swap  const 2  sub call $fib  swap pop
      add
     ret
 
-    height 1
+    height 2
     label :base_case
     ret
 }

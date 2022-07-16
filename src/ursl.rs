@@ -1,5 +1,5 @@
 use super::*;
-use std::fmt::{self, Display, Formatter, Result};
+use std::{fmt::{self, Display, Formatter, Result}, cmp};
 
 pub struct InstructionEntry<'a> {
     pub excess_height: usize,
@@ -32,7 +32,7 @@ pub enum Instruction<'a> {
     Halt,
 
     Call(&'a str),
-    IndirectCall(StackBehaviour),
+    IndirectCall(CallingConvention, StackBehaviour),
     Ret,
 
     Ref(usize),
@@ -57,7 +57,9 @@ impl Display for Instruction<'_> {
             Self::Halt => write!(f, "halt"),
 
             Self::Call(func) => write!(f, "call {func}"),
-            Self::IndirectCall(stack) => write!(f, "icall {stack}"),
+            Self::IndirectCall(call_convention, stack) => {
+                write!(f, "extern \"{call_convention}\" icall {stack}")
+            }
             Self::Ret => write!(f, "ret"),
 
             Self::Ref(idx) => write!(f, "ret {idx}"),
@@ -206,7 +208,14 @@ pub fn parse_instructions<'a>(
             }
             "icall" => {
                 let stack = op!(stack);
-                inst!(Instruction::IndirectCall(stack); stack!(stack.input + 1; -> stack.output))
+                inst!(Instruction::IndirectCall(CallingConvention::URSL, stack); stack!(stack.input + 1; -> stack.output))
+            }
+            "extern_icall" => {
+                let stack = op!(stack);
+                let call_convention =
+                    parse_call_convention(inst.field("call_convention", unit), unit)
+                        .extend_into(&mut errors);
+                inst!(Instruction::IndirectCall(call_convention, stack); stack!(stack.input + 1; -> stack.output))
             }
             "ref" => inst!(Instruction::Ref(op!(loc)); 0 -> 1),
             "get" => inst!(Instruction::Get(op!(loc)); 0 -> 1),
@@ -477,8 +486,8 @@ pub fn emit_instructions<'a>(
                         FunctionBody::Permutation(perm) => reg_alloc.apply_permutation(perm),
 
                         // Technically ``FunctionBody::Deferred`` should never appear here.
-                        // But by definition it should be identical to a ``FunctionBody::Ursl``.
-                        // So therefore, emitting should act the exact same.
+                        // Emit it as URSL call convention because that is the primary use for it
+                        // and that's a reasonable default in general too.
                         FunctionBody::Deferred | FunctionBody::Ursl { .. } => {
                             let params = reg_alloc.get(func.stack.input).to_vec();
                             reg_alloc.pop(params.len());
@@ -489,7 +498,8 @@ pub fn emit_instructions<'a>(
                                 func.stack,
                                 params,
                                 &mut reg_alloc,
-                                &CallingConvention::URSL,
+                                CallingConvention::URSL,
+                                max_regs,
                             )?;
                         }
                         FunctionBody::Extern(call_convention, label) => {
@@ -502,7 +512,8 @@ pub fn emit_instructions<'a>(
                                 func.stack,
                                 params,
                                 &mut reg_alloc,
-                                call_convention,
+                                *call_convention,
+                                max_regs,
                             )?;
                         }
                     }
@@ -510,7 +521,7 @@ pub fn emit_instructions<'a>(
                     panic!("Already checked that func exists. This should be unreachable.")
                 }
             }
-            Instruction::IndirectCall(stack) => {
+            Instruction::IndirectCall(call_convention, stack) => {
                 let params = reg_alloc.get(stack.input).to_vec();
                 reg_alloc.pop(params.len());
                 let func = reg_alloc.top();
@@ -522,7 +533,8 @@ pub fn emit_instructions<'a>(
                     stack,
                     params,
                     &mut reg_alloc,
-                    &CallingConvention::URSL,
+                    call_convention,
+                    max_regs,
                 )?;
             }
         }
@@ -550,7 +562,8 @@ fn write_call(
     stack: StackBehaviour,
     params: Vec<AllocationSlot>,
     reg_alloc: &mut RegisterAllocation,
-    call_convention: &CallingConvention,
+    call_convention: CallingConvention,
+    max_regs: &mut usize,
 ) -> io::Result<()> {
     match call_convention {
         // These are equivalent. I think. But I don't think i wanna guarantee that forever by defining that URSL uses the URCL++ calling convention yet.
@@ -571,12 +584,50 @@ fn write_call(
             if params.len() != 0 {
                 writeln!(f, "ADD SP SP {}", params.len())?;
             }
-            for i in used_regs.into_iter().rev() {
-                writeln!(f, "POP ${}", i + stack.output)?
+            for reg in used_regs.into_iter().rev() {
+                *max_regs = cmp::max(*max_regs, reg + stack.output);
+                writeln!(f, "POP ${}", reg + stack.output)?
             }
             reg_alloc.offset(stack.output);
-            for i in 1..=stack.output {
-                reg_alloc.push(AllocationSlot::Register(i))
+            for reg in 1..=stack.output {
+                *max_regs = cmp::max(*max_regs, reg);
+                reg_alloc.push(AllocationSlot::Register(reg))
+            }
+        }
+        CallingConvention::Hexagn => {
+            let used_regs = reg_alloc.all_used_regs();
+            for i in used_regs.iter().copied() {
+                writeln!(f, "PSH ${i}")?;
+            }
+            if params.len() != 0 {
+                if args.verbose {
+                    writeln!(f, "// args")?
+                }
+                for p in params.iter().rev() {
+                    writeln!(f, "PSH {p}")?
+                }
+            }
+            writeln!(f, "CAL {func}")?;
+            if params.len() != 0 {
+                writeln!(f, "ADD SP SP {}", params.len())?;
+            }
+            if stack.output == 1 {
+                for reg in used_regs.into_iter().rev() {
+                    if reg == 1 {
+                        writeln!(f, "POP ${}", reg)?;
+                        *max_regs = cmp::max(*max_regs, reg);
+                    } else {
+                        *max_regs = cmp::max(*max_regs, reg + 1);
+                        writeln!(f, "POP ${}", reg + 1)?
+                    }
+                }
+                reg_alloc.offset_except(1, 1);
+                reg_alloc.push(AllocationSlot::Register(2));
+                *max_regs = cmp::max(*max_regs, 2);
+            } else {
+                for i in used_regs.into_iter().rev() {
+                    writeln!(f, "POP ${i}")?
+                }
             }
         }
     }

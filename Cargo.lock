@@ -112,9 +112,9 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.12.1"
+version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db0d4cf898abf0081f964436dc980e96670a0f36863e4b83aaacdb65c9d7ccc3"
+checksum = "607c8a29735385251a339424dd462993c0fed8fa09d378f259377df08c126022"
 
 [[package]]
 name = "heck"
@@ -394,7 +394,7 @@ dependencies = [
 [[package]]
 name = "tree-sitter-ursl"
 version = "0.0.1"
-source = "git+https://github.com/Terrain2/tree-sitter-ursl#fe1aa1ff0f103388e48204013b8a0e25b02e91d8"
+source = "git+https://github.com/Terrain2/tree-sitter-ursl#a1fa04b1df5a089443165559e79bce7c18f314f5"
 dependencies = [
  "cc",
  "tree-sitter",
