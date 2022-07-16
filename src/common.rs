@@ -158,7 +158,7 @@ pub fn parse_data_literal<'a>(
     let mut errors = Vec::new();
     let result = match node.kind() {
         "array" => DataLiteral::Array(
-            node.children_by_field_name("items", &mut unit.tree.walk())
+            node.children_by_field_name("item", &mut unit.tree.walk())
                 .map(|node| parse_data_literal(node, unit).extend_into(&mut errors))
                 .collect(),
         ),
@@ -235,7 +235,7 @@ pub fn parse_literal<'a>(
         "char" => {
             let node = node.field("content", unit);
             match node.kind() {
-                "char" => Literal::Char(node.text(unit).chars().next().unwrap_or_else(|| {
+                "char_value" => Literal::Char(node.text(unit).chars().next().unwrap_or_else(|| {
                     err!(errors; unit; node, "Somehow the char literal is empty. What the fuck.");
                     '\0'
                 })),

@@ -5,15 +5,15 @@ MINREG 5
 CAL .func__main
 HLT
 .data__str
-DW [ ]
+DW [ 'H' 'e' 'l' 'l' 'o' ',' 32 'W' 'o' 'r' 'l' 'd' ]
 .data__escape
 DW '\n'
 .data__num
 DW 32
 .data__nums
-DW [ ]
+DW [ 1 2 3 4 @MAX ]
 .data__vtable_under_or_under_something
-DW [ ]
+DW [ .func__fib ]
 .func__fib
 LLOD $1 SP 1
 MOV $2 $1
