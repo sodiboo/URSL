@@ -74,6 +74,14 @@ pub struct CliArgs {
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 pub struct Args {
+    /// Emits strings are arrays of their characters. Most URCL compilers do not support strings, so this should work on all URCL compilers.
+    #[clap(short = 's', long)]
+    emit_strings_as_chars: bool,
+
+    /// Flattens arrays before emitting them. Most URCL compilers do not support nested arrays, so this should work on all URCL compilers.
+    #[clap(short = 'a', long)]
+    flatten_arrays: bool,
+
     /// Parses escape sequences and emits the exact codepoint in the output. This will break some URCL compilers since the URCL code can then contain null bytes and newlines in char literals.
     #[clap(short = 'c', long)]
     emit_chars_literally: bool,
@@ -359,9 +367,10 @@ fn compile<'a>(
             .children_by_field_name("data", &mut unit.tree.walk())
         {
             let label = node.field("label", unit).field("name", unit).text(unit);
+            let literal = parse_data_literal(node.field("value", unit), unit).extend_into(&mut errors);
             defs.push((
                 label,
-                parse_data_literal(node.field("value", unit), unit).extend_into(&mut errors),
+                lower_data_literal(args, &headers, literal, node, unit).extend_into(&mut errors),
             ));
         }
 

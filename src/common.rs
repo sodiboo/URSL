@@ -131,7 +131,7 @@ pub trait PositionEntry {
 #[derive(Clone)]
 pub enum DataLiteral<'a> {
     Literal(Literal<'a>),
-    Array(Vec<DataLiteral<'a>>),
+    Array(Vec<(Node<'a>, DataLiteral<'a>)>),
     String(SyntaxString<'a>),
 }
 
@@ -141,8 +141,8 @@ impl Display for DataLiteral<'_> {
             Self::Literal(element) => element.fmt(f),
             Self::Array(elements) => {
                 write!(f, "[ ")?;
-                for element in elements {
-                    write!(f, "{} ", element)?;
+                for (_, element) in elements {
+                    write!(f, "{element} ")?;
                 }
                 write!(f, "]")
             }
@@ -159,7 +159,12 @@ pub fn parse_data_literal<'a>(
     let result = match node.kind() {
         "array" => DataLiteral::Array(
             node.children_by_field_name("item", &mut unit.tree.walk())
-                .map(|node| parse_data_literal(node, unit).extend_into(&mut errors))
+                .map(|node| {
+                    (
+                        node,
+                        parse_data_literal(node, unit).extend_into(&mut errors),
+                    )
+                })
                 .collect(),
         ),
         "string" => DataLiteral::String(parse_string(node, unit).extend_into(&mut errors)),
@@ -342,6 +347,61 @@ pub fn lower_literal<'a>(
             err!(errors; unit; node, "This literal requires {} bits, but the bits header is set to {}.", n.bits(), headers.bits);
         }
     }
+    (element, errors)
+}
+
+pub fn lower_data_literal<'a>(
+    args: &Args,
+    headers: &Headers,
+    mut element: DataLiteral<'a>,
+    node: Node<'a>,
+    unit: &'a CompilationUnit<'a>,
+) -> (DataLiteral<'a>, Vec<SourceError<'a>>) {
+    let mut errors = Vec::new();
+
+    if args.emit_strings_as_chars {
+        if let DataLiteral::String(string) = element {
+            let mut chars = Vec::new();
+            for segment in string.into_segments() {
+                match segment {
+                    StringSegment::Literal(segment) => {
+                        for ch in segment.chars() {
+                            chars.push((node, DataLiteral::Literal(Literal::Char(ch))));
+                        }
+                    }
+                    StringSegment::Escape(esc) => {
+                        chars.push((node, DataLiteral::Literal(Literal::CharEscape(esc))));
+                    }
+                }
+            }
+            element = DataLiteral::Array(chars);
+        }
+    }
+
+    if let DataLiteral::Array(items) = element {
+        let mut result = Vec::new();
+        for (_, item) in items.into_iter().map(|(node, item)| {
+            (
+                node,
+                lower_data_literal(args, headers, item, node, unit).extend_into(&mut errors),
+            )
+        }) {
+            if args.flatten_arrays {
+                if let DataLiteral::Array(items) = item {
+                    result.extend(items);
+                    continue;
+                }
+            }
+            result.push((node, item));
+        }
+        element = DataLiteral::Array(result);
+    }
+
+    if let DataLiteral::Literal(literal) = element {
+        let literal = lower_literal(args, headers, literal, node, unit).extend_into(&mut errors);
+        element = DataLiteral::Literal(literal);
+    }
+
     (element, errors)
 }
 
@@ -669,6 +729,12 @@ impl Debug for SyntaxString<'_> {
                 })
             })?;
         write!(f, "\"")
+    }
+}
+
+impl<'a> SyntaxString<'a> {
+    fn into_segments(self) -> impl Iterator<Item = StringSegment<'a>> {
+        self.0.into_iter().map(|(_, segment)| segment)
     }
 }
 

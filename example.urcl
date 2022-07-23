@@ -5,15 +5,15 @@ MINREG 5
 CAL .URSL_func_main
 HLT
 .URSL_data_str
-DW [ 'H' 'e' 'l' 'l' 'o' ',' 32 'W' 'o' 'r' 'l' 'd' ]
-.URSL_data_escape
-DW '\n'
+DW [ 72 101 108 108 111 44 32 87 111 114 108 100 33 10 0 ]
 .URSL_data_num
 DW 32
 .URSL_data_nums
 DW [ 1 2 3 4 @MAX ]
 .URSL_data_vtable__or__something
 DW [ .URSL_func_fib ]
+.URSL_data_matrix8x8
+DW [ 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 ]
 .URSL_func_example_dot_module_dot_func
 RET
 .URSL_func_fib
