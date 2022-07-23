@@ -437,7 +437,7 @@ fn emit(f: &mut impl Write, args: &Args, result: CompileResult) -> io::Result<()
 
     let mut contents = Vec::new();
     if !args.no_main {
-        writeln!(contents, "CAL .{}", mangle::function_name("main"))?;
+        writeln!(contents, "CAL .{}", mangle::function_name("$main"))?;
         writeln!(contents, "HLT")?;
     }
 
@@ -915,6 +915,7 @@ fn parse_functions<'a>(
                         args,
                         headers,
                         &signatures,
+                        func.node.clone(),
                         node.children_by_field_name("instruction", &mut unit.tree.walk())
                             .collect(),
                         func.name,

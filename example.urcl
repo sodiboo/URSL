@@ -2,29 +2,31 @@ BITS 8
 MINHEAP 0
 MINSTACK 200
 MINREG 5
-CAL .func__main
+CAL .URSL_func_main
 HLT
-.data__str
+.URSL_data_str
 DW [ 'H' 'e' 'l' 'l' 'o' ',' 32 'W' 'o' 'r' 'l' 'd' ]
-.data__escape
+.URSL_data_escape
 DW '\n'
-.data__num
+.URSL_data_num
 DW 32
-.data__nums
+.URSL_data_nums
 DW [ 1 2 3 4 @MAX ]
-.data__vtable_under_or_under_something
-DW [ .func__fib ]
-.func__fib
+.URSL_data_vtable__or__something
+DW [ .URSL_func_fib ]
+.URSL_func_example_dot_module_dot_func
+RET
+.URSL_func_fib
 LLOD $1 SP 1
 MOV $2 $1
 IMM $1 0
-BRE .label__fib__base_under_case $3 0
-BRE .label__fib__base_under_case $3 1
+BRE .URSL_func_fib_label_base__case $3 0
+BRE .URSL_func_fib_label_base__case $3 1
 SUB $3 $2 1
 PSH $1
 PSH $2
 PSH $3
-CAL .func__fib
+CAL .URSL_func_fib
 ADD SP SP 1
 POP $4
 POP $3
@@ -32,7 +34,7 @@ SUB $1 $4 2
 PSH $3
 PSH $2
 PSH $1
-CAL .func__fib
+CAL .URSL_func_fib
 ADD SP SP 1
 POP $4
 POP $5
@@ -40,10 +42,11 @@ ADD $1 $4 $2
 MOV $2 $1
 MOV $1 $5
 RET
-.label__fib__base_under_case
+.URSL_func_fib_label_base__case
 RET
-.func__main
+.URSL_func_main
 PSH 20
-CAL .func__fib
+CAL .URSL_func_fib
 ADD SP SP 1
 OUT %NUMB $2
+RET

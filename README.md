@@ -162,6 +162,28 @@ In URSL, instruction labels are marked with ``:`` prefix, and data labels with a
 
 The stack height is enforced across jumps. Jumps to a label must either have the correct stack height from the instruction immediately preceding the label, or the label must be preceded by a ``height`` directive, which is always preceded by an unconditional control flow instruction (that is, ``ret``, ``halt``, ``jump``, which never execute the instruction after). The ``height`` directive informs the compiler of the expected stack height in the next instruction, in cases where the compiler does not know.
 
+# Name mangling
+
+So, you might notice that there are three different kinds of "labels" in URSL that look the exact same in URCL. ``$func``, ``:inst_label`` and ``.data_label`` must all compile to a single URCL label of the form ``.label``.
+
+Naturally, since they look completely different in code, the same name should be usable with a different sigil and get a unique label? You can. And for instruction labels, they are even unique to each individual function! This is where the name mangling comes into play.
+
+The name mangling isn't like, entirely stable for sure 100%, but i'm fairly happy with it as it stands right now, and pretty sure it's not gonna change, so i will document it here:
+
+The current name mangling relies on a balanced set of underscores. (i.e. there is always an even number of underscores in the label name)
+
+The name mangling uses several "fields" and "values" for those fields. Every label starts with ``URSL``, and then comes the fields. The prefix is useful for ffi, because it prevents name collisions with arbitrary other labels.
+
+Every field becomes an undescore, followed by the field name (guaranteed to be unique by choosing the field names carefully in the compiler, not escaped in any way, currently only ``data``, ``func``, ``label``) and then another underscore. Then comes the value without any delimiters.
+
+For example, the ``$main`` function becomes ``.URSL_func_main``. Labels can also contain underscores. For readability of the output, underscores are simply escaped as double undescores. A function like ``$hello_world`` becomes ``.URSL_func_hello__world``.
+
+Any special characters in the name also get escaped using an underscore, a readable alphanumeric name, and another underscore. Currently that's only ``.`` which is escaped as ``_dot_``.
+
+For local labels, there are two fields, the "func" and the "label". They can nicely be represented as ``$func:label``, and an example like ``$fibonacci:base_case`` will be mangled as ``.URSL_func_fibonacci_label_base__case``.
+
+Most languages don't allow dots in their identifiers, so dots are useful for your own name mangling. Just use dots as the delimiter. For example, ``$example.module.func`` becomes ``.URSL_func_example_dot_module_dot_func``.
+
 # Extern functions
 
 URSL supports a declaration without a body like so:

@@ -1,29 +1,37 @@
-// these functions ensure all labels in a program are unique. these can be parsed back into the original data they were mangled from, which isn't actually necessary, but is an intuitive proof that they'll all be unique
-
-fn encode(label: &str) -> String {
-    let mut result = String::with_capacity(label.len());
-    for ch in label.chars() {
-        match ch {
-            '.' => result.push_str("_dot_"),
-            '_' => result.push_str("_under_"),
-            ch => result.push(ch),
+fn encode<'a>(fields: impl AsRef<[(&'a str, &'a str)]>) -> String {
+    let fields = fields.as_ref();
+    let mut result = String::with_capacity(
+        fields
+            .iter()
+            .map(|(name, value)| name.len() + value.len())
+            .sum(),
+    );
+    result.push_str("URSL");
+    for (name, value) in fields {
+        result.push('_');
+        result.push_str(name);
+        result.push('_');
+        for ch in value.chars() {
+            match ch {
+                '.' => result.push_str("_dot_"),
+                '_' => result.push_str("__"),
+                ch => result.push(ch),
+            }
         }
     }
     result
 }
 
 pub fn data_label(label: &str) -> String {
-    format!("data__{}", encode(label))
+    encode(&[("data", label)])
 }
 
 pub fn local_label(function: &str, label: &str) -> String {
-    format!(
-        "label__{}__{}",
-        encode(function.trim_start_matches('$')),
-        encode(label)
-    )
+    assert_eq!(function.chars().nth(0), Some('$'));
+    encode(&[("func", &function[1..]), ("label", label)])
 }
 
 pub fn function_name(function: &str) -> String {
-    format!("func__{}", encode(function.trim_start_matches('$')))
+    assert_eq!(function.chars().nth(0), Some('$'));
+    encode(&[("func", &function[1..])])
 }

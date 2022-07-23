@@ -36,3 +36,8 @@ func $fib 1 -> 2 {
     label :base_case
     ret
 }
+
+// Example of ``.`` being allowed in a function name, and how it is escaped
+func $example.module.func {
+    
+}
