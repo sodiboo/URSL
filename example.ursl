@@ -14,6 +14,7 @@ func $main {
     const 20
     const $fib
     perm [a b] -> [b a]
+    // This is also a testament to how unsafe "extern icall" is. It's not that hard to just completely fuck up the calling convention and get weird unexplainable behaviour.
     extern "Hexagn" icall 1 -> 1
     out %NUMB
 }
