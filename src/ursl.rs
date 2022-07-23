@@ -73,6 +73,7 @@ pub fn parse_instructions<'a>(
     args: &Args,
     headers: &Headers,
     signatures: &HashMap<&str, (StackBehaviour, bool)>,
+    parent: Node<'a>,
     nodes: Vec<Node<'a>>,
     func_name: &'a str,
     locals: usize,
@@ -317,6 +318,15 @@ pub fn parse_instructions<'a>(
         if let Some(height) = height {
             if height != 0 {
                 err!(errors; None, "Stack is not empty at the end of {func_name} (height is {height})");
+            } else {
+                instructions.push(InstructionEntry {
+                    excess_height: 0,
+                    enter_height: 0,
+                    exit_height: None,
+                    instruction: Instruction::Ret,
+                    node: parent,
+                    unit,
+                });
             }
         }
     } else if height.is_some() {
