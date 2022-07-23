@@ -12,11 +12,9 @@ Note that in this document, sequences where multiple "instructions" are written 
 
 To use the compiler in this document, first [install rust](https://rustup.rs/), and then just do ``cargo run -- -i input.ursl -o output.urcl`` with the flags at the end there as you like. (``--`` tells cargo to stop parsing arguments, otherwise ``cargo run --help`` would give you help stuff for ``cargo run``) Do ``cargo run -- --help`` for all the goodies that you can customize. Binaries are not distributed in this repo, but you're free to compile it and do whatever with the resulting binaries.
 
-URSL is an abstraction which is somewhat higher than URCL. It is very similar to WASM text format and .NET CIL. URSL is a stack-oriented language with functions and label scopes within those functions. It is designed to be as easy as possible to compile to URCL, which is why for example memory instructions are literally 1:1 on URCL's available memory instructions. I plan on using this to compile languages such as .NET CIL and WASM to URCL. Stack machines allow for a simplified parser and binary representation of code, because instructions never take more than one immediate operand, and most only take from the operand stack. They are also somewhat easier to compile *to*, because it allows for very simple representation of nested expressions in reverse polish notation, and lowering of code can just translate to a set of stack instructions, without worrying about such things as temporary registers and using the correct available one, because URSL handles that and ensures a register is always available.
+URSL is an abstraction which is somewhat higher than URCL. The 2 main problems it abstracts away is calling conventions, and register allocation. It is very similar to WASM text format and .NET CIL. URSL is a stack-oriented language with functions and label scopes within those functions. It is designed to be as easy as possible to compile to URCL, which is why for example memory instructions are literally 1:1 on URCL's available memory instructions. I plan on using this to compile languages such as .NET CIL and WASM to URCL. Stack machines allow for a simplified parser and binary representation of code, because instructions never take more than one immediate operand, and most only take from the operand stack. They are also somewhat easier to compile *to*, because it allows for very simple representation of nested expressions in reverse polish notation, and lowering of code can just translate to a set of stack instructions, without worrying about such things as temporary registers and using the correct available one, because URSL handles register allocation and ensures it just works. At least, it's supposed to, but this software is provided without warranty.
 
 Just like WASM text and CIL, instructions are written in lowercase. This helps it look sorta like URCL, but obviously different just by the casing. Oh, and also, most instructions are written as actual english words, because i think it's a lot nicer to read, and URSL's primary purpose isn't to be written by a human, so it's not a huge concern for instructions to be short and faster to write. Some are still abbreviated if their name is actually long, but i'm not keeping it to 3 chars.
-
-Instructions that have signed/unsigned variants generally give the name to the signed variant, and the unsigned variant gets a prefix of ``un``. This is the opposite of URCL, but i like it better. It also matches CIL.
 
 The stack pointer (SP) and program counter (PC) are entirely opaque to URSL code. Memory is not abstracted in any way for URSL, and it is possible to overwrite the callstack, which will cause issues, obviously. Numeric literals in URSL are always unsigned, because i don't wanna deal with signed number literals in the output. The compiler internally keeps track of everything as ``u64``, which is why you cannot use URSL with ``BITS >= 65`` unless you would like to modify the compiler itself to use some kind of bigint. If you want to use negative numbers, you should load them like ``const 0``; ``neg``
 
@@ -24,14 +22,14 @@ The stack pointer (SP) and program counter (PC) are entirely opaque to URSL code
 
 All headers must be specified at the beginning of a program and have no defaults. They are the same as in URCL.
 
-- ``bits 0`` corresponds to URCL's ``BITS 0``
+- ``bits 0`` corresponds to URCL's ``BITS == 0``. There are no ``>=`` or ``<=`` variants in URSL.
 - ``minheap 0`` corresponds to URCL's ``MINHEAP 0``
 - ``minstack 0`` corresponds to URCL's ``MINSTACK 0``
-- There is no equivalent to ``MINREG``
+- The compiler automatically emits ``MINREG`` to be the exact number of registers it uses.
 
-# Predefined data
+# Predefined data (DWs)
 
-At the start of the file, there can be predefined data to keep in RAM. All data definitions must be labeled with a data label (``.name``), which is followed by a literal which is just the same as the ``DW`` operand in URCL (char, number, or array of either), and compiles directly to that instruction. Newlines are technically not signficant in URSL, at least not any more than other whitespace (carefully done to create a simpler grammar) which means that you're free to format arrays however you think makes sense. All definitions are outputted as ``DW``s in the same order, but i really don't recommend you try to do any arithmetic on the pointers to them, and there is no guarantee of what happens if you do so. An exception to this is obviously arrays, whose behaviour is well defined until the end of the array. If you know you can rely on cross-DW values (i.e. out of bounds array indices) on your target platform, you can safely rely on them in URSL too.
+At the start of the file, there can be predefined data to keep in RAM. All such definitions must be labeled with a data label (``.name``), which is followed by a literal which is just the same as the ``DW`` operand in URCL. That is, char, number, label (which can be ``$func`` or ``.data_label``), strings (a somewhat common extension) or an array of any of these. You can also nest arrays. Data definitions will compile directly to a ``DW``. All definitions are outputted as ``DW``s in the same order, but i really don't recommend you try to do any arithmetic on the pointers to them, and there is no guarantee of what happens if you do so. An exception to this is obviously arrays, whose behaviour is well defined until the end of the array. If you know you can rely on cross-DW values (i.e. out of bounds array indices) on your target platform, you can safely rely on them in URSL too.
 
 ``RUN RAM``/``ROM`` is not distinguished in URSL. Depending on the behaviour of the target ISA, either one of these may be fit. URSL expects ``DW``s to be writable (i.e. it always allows writing to a data label, but obviously that won't happen unless your code actually writes to a data label), but URSL output will never try to read or write from an instruction label, or jump to any value that isn't an immediate label. URSL respects that instructions may be stored in addressable memory, and does not require ``#0`` to be a specific value it can figure out just by the data definitions. Any pointers that are outside the heap (less than ``#0``) are undefined behaviour in URSL, unless they're made from data labels, or from the ``ref`` instruction (given that stack frame still exists)
 
@@ -41,9 +39,9 @@ At any given point in code, the operand stack height is known statically. That's
 
 The callstack is where arguments and locals are located. Just as with WASM, they are accessed using two unified instructions which i called ``get`` and ``set`` (as opposed to .NET's  ``ldarg``, ``ldloc``, ``starg``, ``stloc``). It takes one immediate value, which is the index of the local variable. ``get 0`` is the first argument, and for example if there are 2 arguments, ``get 2`` will be the first local variable.
 
-Stack entries start at ``R1`` and as you load more, they will expand towards higher-valued registers.
+Stack entries usually start at ``R1`` and as you load more, they will expand towards higher registers. The compiler is, however, free to use literally any register it wants to. This often happens to reduce the number of registers used.
 
-For example, this code:
+As an example of how URSL may be translated, take this code:
 
 ```ursl
 const 1
@@ -53,9 +51,10 @@ add
 add
 ```
 
-will calculate the value of ``1 + (2 + 3)`` (the code is essentially reverse polish notation for this expression). When compiled to URCL, it will look like this, assuming the stack was empty (height 0):
+It will calculate the value of ``1 + (2 + 3)`` (the code is essentially reverse polish notation for this expression). When compiled to URCL, it will look something like this if it started at an empty stack:
 
 ```arm
+// stack height is 0
 IMM R1 1
 // stack height is 1
 IMM R2 2
@@ -68,41 +67,39 @@ ADD R1 R1 R2 // after reading operands, stack height is 0, this is why it uses t
 //stack height is 1
 ```
 
-If the stack was not empty such as with a height of 1, then all the registers will be shifted upwards so the code above becomes ``IMM R2 1``; ``IMM R3 2``; ... and so on with the last add being ``ADD R2 R2 R3``.
+Because of some optimizations with permutations and ``const``s and picking the shortest of several emit paths, code usually looks more like this:
+
+```arm
+ADD R1 2 3
+ADD R1 1 R1
+```
+
+This is the shortest that example gets without the compiler needing to know what ``ADD`` means.
 
 # Functions
 
-Because of how functions work in regards to stack manipulation, they are implemented specially in URSL, and are not just label jumps with a return pointer.
-
+Because of how functions work in regards to stack manipulation, they are treated well in URSL, and are not just neglected with label jumps and a return pointer.
 
 Functions are declared using a syntax like ``func $name args -> returns + locals``, where ``args``, ``returns``, ``locals`` are all numeric literals. The stack behaviour of calling a function is determined by the ``args -> returns`` part. The ``+ locals`` part is optional, defaulting to zero. The stack behaviour part is also optional, defaulting to zero also. That's nice especially for the ``$main`` function, which minimally is declared only as ``func $main { ret }``. The ``$main`` function must take zero arguments and return zero values. It can have locals, and it is the entrypoint of a URSL program. Additionally, if a function returns zero values, it can "fall out" of its block with an empty stack. (i.e. the ``ret`` at the end is optional for zero-returning functions)
 
 Inside a function, the operand stack starts at height 0, and ``ret`` must have stack height equal to the return count. This makes ``ret`` pretty much translate directly to a URCL ``RET`` instruction when no locals need to be deallocated, with all the heavy lifting being done at the callsite.
 
-When calling a function like ``call $example``, its input arguments is however many off the top of the caller's stack it should receive. Take, for example, ``$example 2 -> 5 + 3`` (has 2 arguments, and 3 locals, and returns 5 values), and the caller has 4 items on their stack. It should translate into this URCL code:
+When calling a function like ``call $example``, its input arguments is however many off the top of the caller's stack it should receive. Take, for example, ``$example 2 -> 5 + 3`` (has 2 arguments, and 3 locals, and returns 5 values), and the caller has 4 items on their stack. It should translate into something like this URCL code:
 
 ```arm
 // unload extra op stack entries to callstack
 PSH R1
 PSH R2
-// return pointer
-PSH ~+4
 // arguments are passed in reverse because SP points to arg 0, locals are allocated within the function which allows function pointers without needing the locals to be part of the signature
 // 2 arguments being passed
 PSH R4
 PSH R3
-JMP .example // the label may be mangled
-// return from function: stack height is 5 but we need to get the extra 2 as well.
-// the return pointer was popped, so only our two extra operands are on the stack
-// we need to shift everything up 2 regs
-MOV R7 R5
-MOV R6 R4
-MOV R5 R3
-MOV R4 R2
-MOV R3 R1
-// and pop the last 2 operands
-POP R2
-POP R1
+CAL .example // the label will be mangled
+// bulk pop args from stack
+ADD SP SP 2
+// the function returns 5 values in R1..R5, but we have 2 more to be popped.
+POP R7
+POP R6
 // continue with the next instructions
 ```
 
@@ -110,50 +107,44 @@ POP R1
 
 You can use function pointers in URSL. Functions are "constant values", much like data labels, and can appear in the data section or inside a ``const`` instruction. This will load the value of its mangled label onto the stack, and erases the signature. You then *must* remember its signature externally, and you can call it with ``icall``. The ``icall`` instruction takes a function signature as an immediate argument, and it behaves exactly as ``call``, except it takes one more stack operand than the arguments. The arguments are at the top of the stack, and just below all of the arguments is the pointer to the function to call. Take for example, the stack height is 5, and you do ``icall 2 -> 3``. That will consume the top *3* stack operands, output 3 more and translate to the following URCL code:
 
-```
-// unload extra op stack entries to callstack. Notice that there are only two extras here, not (5 - 2) = 3, because R3 is the function pointer
+```arm
+// unload extra op stack entries to callstack
 PSH R1
 PSH R2
-// return pointer
-PSH ~+4
+// arguments are passed in reverse because SP points to arg 0, locals are allocated within the function which allows function pointers without needing the locals to be part of the signature
 // 2 arguments being passed
 PSH R5
 PSH R4
-// call the function
-JMP R3
-// return from function: stack height is 5 but we need to get the extra 2 as well.
-// the return pointer was popped, so only our two extra operands are on the stack
-// we need to shift everything up 2 regs
-MOV R5 R3
-MOV R4 R2
-MOV R3 R1
-// and pop the last 2 operands
-POP R2
-POP R1
+CAL R3 // the label will be mangled
+// bulk pop args from stack
+ADD SP SP 2
+// the function returns 5 values in R1..R5, but we have 2 more to be popped.
+POP R7
+POP R6
 // continue with the next instructions
 ```
 
 It is important to put emphasis on the exact place a function pointer exists in. Take this example:
 
 ```
-// arguments
-call $example
+  // arguments
+  call $example
 ```
 
 The equivalent indirect call is **NOT** this:
 
 ```diff
-// arguments
+  // arguments
 - const $example
-icall 0 -> 0
+  icall 0 -> 0
 ```
 
 It is this:
 
 ```diff
 + const $example
-// arguments
-icall 0 -> 0
+  // arguments
+  icall 0 -> 0
 ```
 
 # Labels and jumps
@@ -164,7 +155,7 @@ The stack height is enforced across jumps. Jumps to a label must either have the
 
 # Name mangling
 
-So, you might notice that there are three different kinds of "labels" in URSL that look the exact same in URCL. ``$func``, ``:inst_label`` and ``.data_label`` must all compile to a single URCL label of the form ``.label``.
+There are three different kinds of "labels" in URSL that look the exact same in URCL. ``$func``, ``:inst_label`` and ``.data_label`` must all compile to a single URCL label of the form ``.label``.
 
 Naturally, since they look completely different in code, the same name should be usable with a different sigil and get a unique label? You can. And for instruction labels, they are even unique to each individual function! This is where the name mangling comes into play.
 
@@ -198,9 +189,9 @@ This will use the name mangling scheme of the given calling convention. You can 
 extern "URCL++" func $example 2 -> 3 = .example;
 ```
 
-Some calling conventions depend on additional stuff like parameters and may require you to specify a label. For example, hexagn depends on parameter types for the label mangling. URSL does not support any additional parameters to extern declarations, so labels for ``extern "hexagn"`` are mandatory.
+Some calling conventions depend on additional stuff like parameters and may require you to specify a label. For example, hexagn depends on parameter types for the label mangling. URSL does not support any additional parameters to extern declarations, so labels for ``extern "Hexagn"`` are mandatory. I also don't think their name mangling is entirely stable, so it's just easier in general for me to pass the problem of mangling onto my users.
 
-These calling conventions are supported:
+These calling conventions are supported as of now:
 
 - URSL (native to URSL, currently equivalent to URCL++ but may change in the future. Consider it opaque)
 - URCL++ (pass args in reverse order, ``CAL``, pop args, will be in ``$1..$n``)
@@ -220,19 +211,19 @@ You can use a forward declaration to declare a function without a body. This is 
 func $example 5 -> 5;
 ```
 
-This ensures that ``$example`` will be declared later during compilation with the same signature. That function may be either implemented in URSL or defined as ``extern`` with some other calling convention. 
+This ensures that ``$example`` will be declared later during compilation with the same signature. That function may be either implemented in URSL or defined as ``extern`` with some other calling convention. If it is never implemented, an error will be emitted.
 
 # Custom instructions
 
 Custom instructions are declared with the ``inst`` keyword, and they act like custom URSL instructions, meaning they don't have the ``$`` prefix and are inlined into the caller. They are not called with the ``call`` instruction, but just by naming them as any other instruction.
 
-Custom instructions are not implemented in URSL, but in a syntax more similar to URCL. This functionality exists so that you can use new URCL instructions without needing me to add them to URSL, and for cases where you need lower level access to URCL. Also, most of the default instructions are defined in terms of custom instructions which allows URSL to have a simpler compiler that doesn't explicitly define how to emit boring instructions that only take a single line for the translation in this document.
+Custom instructions are not implemented as URSL, but with a syntax more similar to URCL. This functionality exists so that you can use new URCL instructions without needing me to add them to URSL, and for cases where you need lower level access to URCL. Also, most of the default instructions are defined in terms of custom instructions which allows URSL to have a simpler compiler that doesn't explicitly define how to emit boring instructions that don't have any semantic meaning relevant to URSL.
 
-Custom instructions are not emitted exactly as the original code (some transformations do modify it, which i'll explain later), but all instructions are mapped one-to-one in outputted code in the same order.
+Custom instructions are not emitted exactly as the original code (some transformations do modify it, which i'll explain), but all URCL instructions in their bodies are mapped one-to-one in outputted code in the same order.
 
-Custom instructions have the instruction/data label abstraction that URSL has, meaning that jumps look like ``JMP :label``, not ``JMP .label`` (as they do in URCL). Every instruction in a URCL function can be labeled, and they are converted into relatives for the output, since i didn't wanna deal with unique stateful mangled labels. An instruction can only have *one* label. Data labels can only appear as source operands, and instruction labels can only appear as destination operands.
+Custom instructions have the instruction/data label abstraction that URSL has, meaning that jumps look like ``JMP :label``, not ``JMP .label`` (as you may expect from URCL). Every instruction in a URCL function can be labeled, and they are converted into relatives for the output, since i didn't wanna deal with unique stateful mangled labels (i.e. different every time they are emitted). An instruction can have any number of labels. Data labels can only appear as source operands, and instruction labels can only appear as destination operands.
 
-In custom instructions, there are 3 operand kinds: instruction label, immediate value, and registers. Immediate values are the same as the arguments to the ``const`` instruction in URSL. Memory locations are immediate values, and unlike in URCL, they cannot start with ``M``. They must be prefixed with ``#``. Same with registers, those are always ``$``. This allows me to make a simpler parser, because if ``R`` was allowed, then the instructions cannot be arbitary (i.e. they are parsed with a regex like ``\w+``), since it would cause an ambiguity whether an instruction has 3 operands or if it has 2 operands and a new instruction starts. Unlike URCL, in URSL all whitespace is equivalent, including newlines and comments, so i did not want to make the grammar newline sensitive just because you want ``R``/``M`` prefixes.
+In custom instructions, there are 3 operand kinds: instruction labels, immediate values, and registers. Immediate values are the same as the arguments to the ``const`` instruction in URSL. Memory locations are immediate values, and unlike in URCL, they cannot start with ``M``. They must be prefixed with ``#``. Same with registers, those are always ``$``. This allows me to make a simpler parser, because if ``R`` was allowed, then the instructions cannot be arbitary (i.e. they are parsed with a regex like ``\w+``), since it would cause an ambiguity whether an instruction has 3 operands or if it has 2 operands and a new instruction starts. Unlike URCL, in URSL all whitespace is equivalent, including newlines and comments, and i did not want to make the grammar newline sensitive just because you want ``R``/``M`` prefixes.
 
 Registers can also be prefixed with ``&``, in which case they will be *named registers*. I recommend using named registers, because it's more readable most of the time. Other than the different naming, they behave identically to indexed registers and just look slightly differently. The only exception is ``$0``, which of course, always maps to the actual zero register.
 
@@ -256,7 +247,7 @@ These rules are carefully chosen to intentionally leave out this functionality:
 
 The syntax of defining such an instruction is as so:
 
-```
+```ursl
 inst example $1 $2 -> $3 $4 {
     // body
 }
@@ -270,7 +261,7 @@ You may overwrite those registers, and if you rename them to something like ``&a
 
 However, if you do NOT plan to overwrite a register, you may use a little trick for optimization. You can put a register in angle brackets to tell the compiler that you never plan to write to this register.
 
-```
+```ursl
 inst store <$1> <$2> {
     STR $1 $2
 }
@@ -310,11 +301,11 @@ You may only have one branch block per instruction. Use shared operands wherever
 
 # Custom permutations
 
-"Custom permutations" are custom instructions that are declared using a permutation only, instead of URCL code. This allows you to give name to commonly used permutations, like ``nop``, ``dup``, ``pop``, etc
+"Custom permutations" are custom instructions that are declared using a permutation only, instead of URCL code. This allows you to give names to commonly used permutations (like ``nop``, ``dup``, ``pop``, etc)
 
-Their syntax is just ``inst name [a b c] -> [a b c]`` where ``[a b c]`` is just any number of identifiers that are delimited by square brackets, and ``name`` is the instruction name. See [perm](#perm-a-b-c---c-a-b)
+Their syntax is just ``inst name [a b c] -> [a b c]`` where ``[a b c]`` is just any number of identifiers that are delimited by square brackets, and ``name`` is the instruction name. See the instrinsic instruction ``perm`` for more information. That fucky header name doesn't work well in links, so if you expected to click that name, nope. scroll down like less than a page, you lazy goose.
 
-If you frequently use the same permutation, then a custom permutation declaration is usually more readable, and may also speed up compilation times (as their translations are cached when defined, but anonymous ``perm``s are compiled individually), but other than that it should behave identically to the anonymous permutation
+If you frequently use the same permutation, then a custom permutation declaration is usually more readable, but other than that it should behave identically to the anonymous permutation
 
 # Intrinsic instructions
 
@@ -332,7 +323,7 @@ This instruction defines a label that can be jumped to. Internally, due to optim
 
 ## ``perm [a b c] -> [c a b]``
 
-This instruction names the top elements of the operand stack in the left grouping (rightmost item is the top element), and in the right grouping it uses the same names to define the order these elements will be pushed back to the stack. ``perm`` is short for permutate, or permutation, and the example given in the syntax above will rotate the top 3 elements, such that the previously-topmost element is the third from the top. By convention, the left side is usually named alphabetically, but they can be any identifier.
+This instruction names the top elements of the operand stack in the left grouping (rightmost item is the top element), and in the right grouping it uses the same names to define the order these elements will be pushed back to the stack. ``perm`` is short for permute, or permutation, and the example given in the syntax above will rotate the top 3 elements, such that the previously-topmost element is the third from the top. By convention, the left side is usually named alphabetically, but they can be any identifier.
 
 This is always free, because it is a compile-time operation.
 
@@ -416,7 +407,7 @@ This conditionally branches to the label in the immediate operand. Unlike other 
 
 ---
 
-# Prelude instructions
+## Prelude instructions
 
 The following instructions are not actually part of the core of the language, but are imported from [the prelude](src/prelude.ursl). You can turn this off with the ``--no-prelude`` parameter to the compiler.
 
