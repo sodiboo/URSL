@@ -466,7 +466,7 @@ pub fn emit_instructions<'a>(
                                          pos: _,
                                      }| {
                                         let mut emit = Vec::new();
-                                        let mut max_regs = 0;
+                                        let mut max_regs = *max_regs;
                                         let reg_alloc = urcl::emit_instructions(
                                             &mut emit,
                                             instructions,
@@ -595,12 +595,12 @@ fn write_call(
                 writeln!(f, "ADD SP SP {}", params.len())?;
             }
             for reg in used_regs.into_iter().rev() {
-                *max_regs = cmp::max(*max_regs, reg + stack.output);
+                *max_regs = (*max_regs).max(reg + stack.output);
                 writeln!(f, "POP ${}", reg + stack.output)?
             }
             reg_alloc.offset(stack.output);
             for reg in 1..=stack.output {
-                *max_regs = cmp::max(*max_regs, reg);
+                *max_regs = (*max_regs).max(reg);
                 reg_alloc.push(AllocationSlot::Register(reg))
             }
         }
@@ -625,15 +625,15 @@ fn write_call(
                 for reg in used_regs.into_iter().rev() {
                     if reg == 1 {
                         writeln!(f, "POP ${}", reg)?;
-                        *max_regs = cmp::max(*max_regs, reg);
+                        *max_regs = (*max_regs).max(reg);
                     } else {
-                        *max_regs = cmp::max(*max_regs, reg + 1);
+                        *max_regs = (*max_regs).max(reg + 1);
                         writeln!(f, "POP ${}", reg + 1)?
                     }
                 }
                 reg_alloc.offset_except(1, 1);
                 reg_alloc.push(AllocationSlot::Register(2));
-                *max_regs = cmp::max(*max_regs, 2);
+                *max_regs = (*max_regs).max(2);
             } else {
                 for i in used_regs.into_iter().rev() {
                     writeln!(f, "POP ${i}")?

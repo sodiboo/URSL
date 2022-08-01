@@ -400,19 +400,16 @@ pub fn emit_instructions<'a>(
                     regs.entry(reg).or_insert_with(|| input_regs[i].clone());
                 }
                 InputRegister::Owned(input_reg) => {
-                    if let AllocationSlot::Register(allocated_reg) = input_regs[i] {
-                        if reg_alloc.can_own_in_place(allocated_reg) {
+                    match input_regs[i]  {
+                        AllocationSlot::Register(allocated_reg) if reg_alloc.can_own_in_place(allocated_reg) => {
                             regs.entry(input_reg)
                                 .or_insert_with(|| AllocationSlot::Register(allocated_reg));
-                        } else {
+                        }
+                        ref slot => {
                             let next = reg_alloc.next_reg();
-                            writeln!(f, "MOV {next} {}", input_regs[i])?;
+                            writeln!(f, "MOV {next} {slot}")?;
                             regs.entry(input_reg).or_insert_with(|| next);
                         }
-                    } else {
-                        let next = reg_alloc.next_reg();
-                        writeln!(f, "MOV {next} {}", input_regs[i])?;
-                        regs.entry(input_reg).or_insert_with(|| next);
                     }
                 }
             }

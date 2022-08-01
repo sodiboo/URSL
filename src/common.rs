@@ -595,7 +595,7 @@ impl<'a> RegisterAllocation<'a> {
                     // if the register is already used in the pre-shuffle part, just assign it to the final destination and don't touch it here!
                     // note that it does not fucking matter which dest is chosen on the off chance that the find will be valid for several items
                     if let Some((_, dest)) = changes.iter().find(|(s, _)| *s == *src) {
-                        ignored_on_purpose.push(i + 1);
+                        ignored_on_purpose.push(i + length);
                         *src = *dest;
                         None
                     } else {

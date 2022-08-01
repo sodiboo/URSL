@@ -20,8 +20,8 @@ RET
 LLOD $1 SP 1
 MOV $2 $1
 IMM $1 0
-BRE .URSL_func_fib_label_base__case $3 0
-BRE .URSL_func_fib_label_base__case $3 1
+BRE .URSL_func_fib_label_base__case $2 0
+BRE .URSL_func_fib_label_base__case $2 1
 SUB $3 $2 1
 PSH $1
 PSH $2
@@ -49,4 +49,13 @@ PSH 20
 CAL .URSL_func_fib
 ADD SP SP 1
 OUT %NUMB $2
+RET
+.URSL_func_print__string
+LLOD $1 SP 1
+.URSL_func_print__string_label_loop
+LOD $2 $1
+BRE .URSL_func_print__string_label_exit $2 0
+OUT %TEXT $2
+JMP .URSL_func_print__string_label_loop
+.URSL_func_print__string_label_exit
 RET

@@ -51,3 +51,20 @@ func $fib 1 -> 2 {
 func $example.module.func {
     
 }
+
+func $print_string 1 -> 0 {
+    get 0
+
+    label :loop
+        dup
+        load
+            dup
+            const 0
+            eq branch :exit
+        out %TEXT
+    jump :loop
+
+    height 2
+    label :exit
+    pop pop
+}
