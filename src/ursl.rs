@@ -1,5 +1,5 @@
 use super::*;
-use std::{fmt::{self, Display, Formatter, Result}, cmp};
+use std::fmt::{self, Display, Formatter, Result};
 
 pub struct InstructionEntry<'a> {
     pub excess_height: usize,
@@ -345,6 +345,7 @@ pub fn emit_instructions<'a>(
     max_regs: &mut usize,
 ) -> io::Result<()> {
     assert!(!instructions.is_empty()); // empty instruction lists are only allowed for -> 0, and parsing normalizes them to end with a ret
+    writeln!(f)?;
     writeln!(f, ".{}", mangle::function_name(func.name))?;
     if args.garbage_initialized_locals {
         if func.stack.input != 0 {
