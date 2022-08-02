@@ -17,6 +17,8 @@ minheap 0
     [ 56 57 58 59 60 61 62 63 ]
 ]
 
+.thats_awesome "That's awesome!"
+
 // inst swap [a b] -> [b a]
 
 func $main {

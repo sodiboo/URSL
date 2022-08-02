@@ -366,8 +366,18 @@ pub fn lower_data_literal<'a>(
                 match segment {
                     StringSegment::Literal(segment) => {
                         for ch in segment.chars() {
-                            chars.push((node, DataLiteral::Literal(Literal::Char(ch))));
+                            chars.push((
+                                node,
+                                DataLiteral::Literal(if ch == '\'' {
+                                    Literal::CharEscape(CharEscape::Char(ch))
+                                } else {
+                                    Literal::Char(ch)
+                                }),
+                            ));
                         }
+                    }
+                    StringSegment::Escape(CharEscape::Char('"')) => {
+                        chars.push((node, DataLiteral::Literal(Literal::Char('"'))));
                     }
                     StringSegment::Escape(esc) => {
                         chars.push((node, DataLiteral::Literal(Literal::CharEscape(esc))));
