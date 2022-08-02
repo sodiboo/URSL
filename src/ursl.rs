@@ -248,7 +248,7 @@ pub fn parse_instructions<'a>(
                         unit,
                     }, "Branch without a prefix instruction")
                 });
-                let opcode = if let Instruction::Call(opcode) = previous.instruction {
+                let opcode = if let Instruction::Call(opcode) = previous.instruction && signatures.get(opcode).map(|&(_, is_branch)| is_branch).unwrap_or(false) {
                     opcode
                 } else {
                     err!(errors; unit; inst; "", "Branch prefix has no branching variant")
@@ -258,6 +258,9 @@ pub fn parse_instructions<'a>(
                 let (stack, branching) = signatures.get(opcode).unwrap_or(&(stack!(0; -> 1), true));
                 if !branching {
                     err!(errors; unit; inst, "Branch prefix has no branching variant");
+                }
+                if args.verbose {
+                    println!("{opcode} branch ({stack}, {branching})")
                 }
                 assert_eq!(stack.output, 1);
                 InstructionEntry {
