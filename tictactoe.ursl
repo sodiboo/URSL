@@ -1,0 +1,591 @@
+// This file was my entry for the first URCL code competiton, which took place at the beginning of August 2022.
+// It's my first time really writing URSL code, and i noticed some issues with the compiler output.
+// That's why it's here, so i can work on the output from this.
+
+bits 8
+minheap 0
+minstack 4
+
+.top_of_board [
+    "    1   2   3\n"
+    "  +---+---+---+"
+    0
+]
+
+// question marks indicate variable data. the offsets into the string are hardcoded
+.one_row [
+    "? | ? | ? | ? |\n"
+    "  +---+---+---+"
+    0
+]
+
+.state [
+    [ ' '   ' '   ' ' ]
+    [ ' '   ' '   ' ' ]
+    [ ' '   ' '   ' ' ]
+]
+
+.winner [ "? wins!" 0 ]
+.draw [ "It's a draw!" 0 ]
+.bad_input [ "Bad input (halting)" 0 ]
+.occupied_square [ "That cell is occupied" 0 ]
+.computer_no_move [ "lol u win 'cause the\ncomputer fucking died" 0 ]
+.out_of_bounds [ "Selection out of bounds" 0 ]
+
+.last_user_move 0
+
+.triples [
+    [ 0 1 2 ]
+    [ 3 4 5 ]
+    [ 6 7 8 ]
+    [ 0 3 6 ]
+    [ 1 4 7 ]
+    [ 2 5 8 ]
+    [ 0 4 8 ]
+    [ 2 4 6 ]
+]
+
+.selected_ai 0
+
+.available_ai [
+    $random_ai "RNG" 0
+//    $dumbass_ai "Dumbass" 0
+    $smartish_ai "Smartish" 0
+    0
+]
+
+
+// i am allowed to use the internal syntax. i need it for this, because of size limitations.
+__binary__ add.load -> LLOD;
+inst add.store <&base> <&offset> <&value> {
+    LSTR &base &offset &value;
+}
+
+func $main {
+    call $select_ai
+    call $print_board
+
+    label :game_loop
+
+        call $input
+        dup
+        const .state
+            over over
+            add.load
+            const ' '
+            eq branch :valid_input
+        pop pop pop
+        call $state_update
+        const .occupied_square
+        call $print_string
+        jump :game_loop
+
+        height 3
+        label :valid_input
+        const 'X'
+        add.store
+
+        const .last_user_move
+        swap store
+
+        call $state_update
+
+        const .selected_ai
+        load
+        icall 0 -> 0
+
+        call $state_update
+    
+    jump :game_loop
+}
+
+func $select_ai {
+    const 0
+    const 0
+    label :print_available
+        const .available_ai
+        over add.load
+        const 0
+        eq branch :end_print_available
+        inc
+
+        const '['
+        out %TEXT
+        over
+        out %NUMB
+        const ']'
+        out %TEXT
+        const ' '
+        out %TEXT
+
+        label :print_ai_name
+            const .available_ai
+            over add.load
+            dup const 0
+            eq branch :end_print_ai_name
+            out %TEXT
+        inc
+        jump :print_ai_name
+
+        height 3
+        label :end_print_ai_name
+        pop
+        const ' '
+        out %TEXT
+        const 'A'
+        out %TEXT
+        const 'I'
+        out %TEXT
+        const '\n'
+        out %TEXT
+    swap inc
+    swap inc
+    jump :print_available
+
+    height 2
+    label :end_print_available
+    pop pop
+
+    in %NUMB
+    in %TEXT // trailing newline
+    pop
+    const .out_of_bounds
+    call $print_string
+
+    label :input_loop
+        const 0
+    
+        label :find_available
+            const .available_ai
+            over add.load
+            const 0
+            eq branch :no_available
+            inc
+
+            over
+            const 0
+            ne branch :skip_name
+
+            const .available_ai
+            swap dec
+            add.load
+            const .selected_ai
+            swap store
+            pop ret
+
+            height 2
+            label :skip_name
+                const .available_ai
+                over add.load
+                const 0
+                eq branch :end_skip_name
+            inc
+            jump :skip_name
+
+            height 2
+            label :end_skip_name
+        swap dec
+        swap inc
+        jump :find_available
+
+        height 2
+        label :no_available
+        pop
+
+    pop
+    in %NUMB
+    in %TEXT // trailing newline
+    pop
+    jump :input_loop
+}
+
+func $state_update {
+    call $print_board
+
+    const 0
+    label :check_win_loop
+        dup
+        const 24
+        gte branch :exit_check_win
+
+        dup
+        const .triples
+        add.load
+        const .state
+        add.load
+
+        const ' '
+        over
+        eq branch :not_matching
+
+        over const 1
+        add
+        const .triples
+        add.load
+        const .state
+        add.load
+        over
+        ne branch :not_matching
+
+        over const 2
+        add
+        const .triples
+        add.load
+        const .state
+        add.load
+        over
+        ne branch :not_matching
+
+        const .winner
+        swap store
+
+        const .winner
+        call $print_string
+        halt
+
+    height 2
+    label :not_matching
+    pop
+    const 3 add
+    jump :check_win_loop
+
+    height 1
+    label :exit_check_win
+    pop
+
+    const 0
+    label :check_draw_loop
+        dup
+        const 8
+        gte branch :its_a_draw
+
+        const .state
+        over
+        add.load
+        const ' '
+        eq branch :not_a_draw
+
+    inc
+    jump :check_draw_loop
+
+    height 1
+    label :its_a_draw
+    pop
+    const .draw
+    call $print_string
+    halt
+
+    height 1
+    label :not_a_draw
+    pop
+}
+
+// func $dumbass_ai {
+//     const .last_user_move
+//     load
+//     
+//     const 1
+//     over over
+//     add
+//     const 9 mod
+//     const .state
+//     swap add.load
+//     const ' '
+//     eq branch :make_move
+//     pop
+// 
+//     const 8
+//     over over
+//     add
+//     const 9 mod
+//     const .state
+//     swap add.load
+//     const ' '
+//     eq branch :make_move
+//     pop
+// 
+//     const 6
+//     over over
+//     add
+//     const 9 mod
+//     const .state
+//     swap add.load
+//     const ' '
+//     eq branch :make_move
+//     pop
+// 
+//     const 3
+//     over over
+//     add
+//     const 9 mod
+//     const .state
+//     swap add.load
+//     const ' '
+//     eq branch :make_move
+//     pop
+// 
+//     pop
+//     const .died_try_moves
+//     call $print_string
+//     halt
+// 
+//     height 2
+//     label :make_move
+//     swap pop
+//     const .state
+//     swap const 'O'
+//     add.store
+// }
+
+func $random_ai {
+    label :rng_loop
+
+    in %RNG
+    const 9
+    mod
+        const .state
+        over
+        add.load
+        const ' '
+        ne branch :bad_rng
+    const .state
+    const 'O'
+    add.store
+    ret
+
+    height 1
+    label :bad_rng
+    pop
+    jump :rng_loop
+}
+
+func $smartish_ai {
+    const 'O'
+    call $do_triple
+    bool branch :finished
+
+    const 'X'
+    call $do_triple
+    bool branch :finished
+
+    call $random_ai
+
+    height 0
+    label :finished
+}
+
+func $do_triple 1 -> 1 {
+    const 0
+    label :smartish_loop
+        dup
+        const 24
+        gte branch :no_triple
+
+        const .triples
+        over /* const 0
+        add */ add.load
+        const .state
+        swap add.load
+        over
+        height 3
+
+        const .triples
+        over const 1
+        add add.load
+        const .state
+        swap add.load
+        swap
+
+        height 4
+
+        const .triples
+        swap const 2
+        add add.load
+        const .state
+        swap add.load
+
+        height 4
+        perm [a b c] -> [a b c b c a]
+        const ' '
+        ne branch :check1h
+        get 0
+        swap over
+        ne branch :check1h
+        ne branch :check1
+
+        pop pop pop
+        // const 0
+        // add
+        jump :make_move
+
+        height 6
+        label :check1h
+        pop pop
+        label :check1
+        perm [a b c] -> [a b c a c b]
+        const ' '
+        ne branch :check2h
+        get 0
+        swap over
+        ne branch :check2h
+        ne branch :check2
+
+        pop pop pop
+        const 1
+        add
+        jump :make_move
+
+        height 6
+        label :check2h
+        pop pop
+        label :check2
+        perm [a b c] -> [a b c a b c]
+        const ' '
+        ne branch :check_endh
+        get 0
+        swap over
+        ne branch :check_endh
+        ne branch :check_end
+
+        pop pop pop
+        const 2
+        add
+        jump :make_move
+
+        height 6
+        label :check_endh
+        pop pop
+        label :check_end
+        pop pop pop
+
+    const 3 add
+    jump :smartish_loop
+
+    height 1
+    label :make_move
+    const .triples
+    swap add.load
+    const .state
+    swap const 'O'
+    add.store
+    const @MAX ret
+
+    
+    height 1
+    label :no_triple
+    pop
+    const 0 ret
+}
+
+func $input 0 -> 1 {
+    in %TEXT
+    dup const 'A'
+    over const 'C'
+    gt branch :bad3
+    lt branch :bad1
+
+    const 'A' sub
+    const 3 mult
+
+    height 1
+
+    in %TEXT
+    dup const '1'
+    over const '3'
+    gt branch :bad4
+    lt branch :bad2
+
+    const '1' sub
+    add
+
+    in %TEXT
+    const '\n'
+    ne branch :bad1
+
+    ret
+
+    height 4
+    label :bad4
+    pop
+    label :bad3
+    pop
+    label :bad2
+    pop
+    label :bad1
+    pop
+
+    const .bad_input
+    call $print_string
+    halt
+}
+
+func $print_board {
+
+    // clear screen
+    const 0x1B
+    out %TEXT
+    const '['
+    out %TEXT
+    const '2'
+    out %TEXT
+    const 'J'
+    out %TEXT
+
+    const .top_of_board
+    call $print_string
+
+    const 0
+    const 'A'
+    label :loop_rows
+        dup const 'C'
+        gt branch :end_loop_rows
+
+        const .one_row over const 0 swap
+        add.store
+
+        over const .one_row swap const 4 swap
+            const .state swap // const 0 add
+            add.load
+        add.store
+
+        over const .one_row swap const 8 swap
+            const .state swap const 1 add
+            add.load
+        add.store
+
+        over const .one_row swap const 12 swap
+            const .state swap const 2 add
+            add.load
+        add.store
+
+        const .one_row
+        call $print_string
+
+    swap const 3 add
+    swap inc
+    jump :loop_rows
+
+    height 2
+    label :end_loop_rows
+    pop pop
+}
+
+func $print_string 1 -> 0 {
+    get 0
+
+    label :loop
+        dup
+        load
+            dup
+            const 0
+            eq branch :exit
+        out %TEXT
+    inc
+    jump :loop
+
+    height 2
+    label :exit
+    pop pop
+    const '\n'
+    out %TEXT
+}

@@ -616,12 +616,12 @@ impl<'a> RegisterAllocation<'a> {
                 }
             })
             .collect::<Vec<_>>();
+        let circular_temp_reg = length + top_changes.len() + 1;
+        changes.extend(top_changes);
         changes = changes
             .into_iter()
             .filter(|(src, dest)| src != dest)
             .collect();
-        let circular_temp_reg = length + top_changes.len() + 1;
-        changes.extend(top_changes);
         let literals = self
             .0
             .iter()

@@ -1,0 +1,337 @@
+BITS 8
+MINHEAP 0
+MINSTACK 4
+MINREG 8
+CAL .URSL_func_main
+HLT
+.URSL_data_top__of__board
+DW [ 32 32 32 32 49 32 32 32 50 32 32 32 51 10 32 32 43 45 45 45 43 45 45 45 43 45 45 45 43 0 ]
+.URSL_data_one__row
+DW [ 63 32 124 32 63 32 124 32 63 32 124 32 63 32 124 10 32 32 43 45 45 45 43 45 45 45 43 45 45 45 43 0 ]
+.URSL_data_state
+DW [ 32 32 32 32 32 32 32 32 32 ]
+.URSL_data_winner
+DW [ 63 32 119 105 110 115 33 0 ]
+.URSL_data_draw
+DW [ 73 116 39 115 32 97 32 100 114 97 119 33 0 ]
+.URSL_data_bad__input
+DW [ 66 97 100 32 105 110 112 117 116 32 40 104 97 108 116 105 110 103 41 0 ]
+.URSL_data_occupied__square
+DW [ 84 104 97 116 32 99 101 108 108 32 105 115 32 111 99 99 117 112 105 101 100 0 ]
+.URSL_data_computer__no__move
+DW [ 108 111 108 32 117 32 119 105 110 32 39 99 97 117 115 101 32 116 104 101 10 99 111 109 112 117 116 101 114 32 102 117 99 107 105 110 103 32 100 105 101 100 0 ]
+.URSL_data_out__of__bounds
+DW [ 83 101 108 101 99 116 105 111 110 32 111 117 116 32 111 102 32 98 111 117 110 100 115 0 ]
+.URSL_data_last__user__move
+DW 0
+.URSL_data_triples
+DW [ 0 1 2 3 4 5 6 7 8 0 3 6 1 4 7 2 5 8 0 4 8 2 4 6 ]
+.URSL_data_selected__ai
+DW 0
+.URSL_data_available__ai
+DW [ .URSL_func_random__ai 82 78 71 0 .URSL_func_smartish__ai 83 109 97 114 116 105 115 104 0 0 ]
+
+.URSL_func_do__triple
+IMM $1 0
+.URSL_func_do__triple_label_smartish__loop
+BGE .URSL_func_do__triple_label_no__triple $1 24
+LLOD $2 .URSL_data_triples $1
+LLOD $2 .URSL_data_state $2
+ADD $3 $1 1
+LLOD $3 .URSL_data_triples $3
+LLOD $3 .URSL_data_state $3
+ADD $4 $1 2
+LLOD $4 .URSL_data_triples $4
+LLOD $4 .URSL_data_state $4
+MOV $5 $3
+MOV $6 $4
+BNE .URSL_func_do__triple_label_check1h $2 32
+LLOD $7 SP 1
+MOV $8 $6
+MOV $6 $7
+MOV $7 $8
+BNE .URSL_func_do__triple_label_check1h $7 $6
+BNE .URSL_func_do__triple_label_check1 $5 $6
+JMP .URSL_func_do__triple_label_make__move
+.URSL_func_do__triple_label_check1h
+.URSL_func_do__triple_label_check1
+MOV $5 $2
+MOV $6 $4
+BNE .URSL_func_do__triple_label_check2h $3 32
+LLOD $7 SP 1
+MOV $8 $6
+MOV $6 $7
+MOV $7 $8
+BNE .URSL_func_do__triple_label_check2h $7 $6
+BNE .URSL_func_do__triple_label_check2 $5 $6
+ADD $2 $1 1
+MOV $1 $2
+JMP .URSL_func_do__triple_label_make__move
+.URSL_func_do__triple_label_check2h
+.URSL_func_do__triple_label_check2
+MOV $5 $2
+MOV $6 $3
+BNE .URSL_func_do__triple_label_check__endh $4 32
+LLOD $7 SP 1
+MOV $8 $6
+MOV $6 $7
+MOV $7 $8
+BNE .URSL_func_do__triple_label_check__endh $7 $6
+BNE .URSL_func_do__triple_label_check__end $5 $6
+ADD $2 $1 2
+MOV $1 $2
+JMP .URSL_func_do__triple_label_make__move
+.URSL_func_do__triple_label_check__endh
+.URSL_func_do__triple_label_check__end
+ADD $2 $1 3
+MOV $1 $2
+JMP .URSL_func_do__triple_label_smartish__loop
+.URSL_func_do__triple_label_make__move
+LLOD $2 .URSL_data_triples $1
+LSTR .URSL_data_state $2 79
+IMM $1 @MAX
+RET
+.URSL_func_do__triple_label_no__triple
+IMM $1 0
+RET
+
+.URSL_func_input
+IN $1 %TEXT
+MOV $2 $1
+IMM $3 65
+BRG .URSL_func_input_label_bad3 $1 67
+BRL .URSL_func_input_label_bad1 $2 $3
+SUB $2 $1 65
+MLT $1 $2 3
+IN $2 %TEXT
+MOV $3 $2
+IMM $4 49
+BRG .URSL_func_input_label_bad4 $2 51
+BRL .URSL_func_input_label_bad2 $3 $4
+SUB $3 $2 49
+ADD $2 $1 $3
+IN $1 %TEXT
+MOV $3 $1
+MOV $1 $2
+MOV $2 $3
+BNE .URSL_func_input_label_bad1 $2 10
+RET
+.URSL_func_input_label_bad4
+.URSL_func_input_label_bad3
+.URSL_func_input_label_bad2
+.URSL_func_input_label_bad1
+PSH .URSL_data_bad__input
+CAL .URSL_func_print__string
+ADD SP SP 1
+HLT
+
+.URSL_func_main
+CAL .URSL_func_select__ai
+CAL .URSL_func_print__board
+.URSL_func_main_label_game__loop
+CAL .URSL_func_input
+LLOD $2 $1 .URSL_data_state
+MOV $4 $2
+MOV $2 $1
+IMM $3 .URSL_data_state
+BRE .URSL_func_main_label_valid__input $4 32
+CAL .URSL_func_state__update
+PSH .URSL_data_occupied__square
+CAL .URSL_func_print__string
+ADD SP SP 1
+JMP .URSL_func_main_label_game__loop
+.URSL_func_main_label_valid__input
+LSTR $2 $3 88
+STR .URSL_data_last__user__move $1
+CAL .URSL_func_state__update
+LOD $1 .URSL_data_selected__ai
+CAL $1
+CAL .URSL_func_state__update
+JMP .URSL_func_main_label_game__loop
+
+.URSL_func_print__board
+OUT %TEXT 27
+OUT %TEXT 91
+OUT %TEXT 50
+OUT %TEXT 74
+PSH .URSL_data_top__of__board
+CAL .URSL_func_print__string
+ADD SP SP 1
+IMM $1 0
+IMM $2 65
+.URSL_func_print__board_label_loop__rows
+BRG .URSL_func_print__board_label_end__loop__rows $2 67
+LSTR .URSL_data_one__row 0 $2
+LLOD $3 .URSL_data_state $1
+LSTR .URSL_data_one__row 4 $3
+ADD $3 $1 1
+LLOD $4 .URSL_data_state $3
+LSTR .URSL_data_one__row 8 $4
+ADD $3 $1 2
+LLOD $4 .URSL_data_state $3
+LSTR .URSL_data_one__row 12 $4
+PSH $1
+PSH $2
+PSH .URSL_data_one__row
+CAL .URSL_func_print__string
+ADD SP SP 1
+POP $2
+POP $1
+ADD $3 $1 3
+INC $1 $2
+MOV $2 $1
+MOV $1 $3
+JMP .URSL_func_print__board_label_loop__rows
+.URSL_func_print__board_label_end__loop__rows
+RET
+
+.URSL_func_print__string
+LLOD $1 SP 1
+.URSL_func_print__string_label_loop
+LOD $2 $1
+BRE .URSL_func_print__string_label_exit $2 0
+OUT %TEXT $2
+INC $2 $1
+MOV $1 $2
+JMP .URSL_func_print__string_label_loop
+.URSL_func_print__string_label_exit
+OUT %TEXT 10
+RET
+
+.URSL_func_random__ai
+.URSL_func_random__ai_label_rng__loop
+IN $1 %RNG
+MOD $2 $1 9
+LLOD $1 .URSL_data_state $2
+MOV $3 $1
+MOV $1 $2
+MOV $2 $3
+BNE .URSL_func_random__ai_label_bad__rng $2 32
+LSTR $1 .URSL_data_state 79
+RET
+.URSL_func_random__ai_label_bad__rng
+JMP .URSL_func_random__ai_label_rng__loop
+
+.URSL_func_select__ai
+IMM $1 0
+IMM $2 0
+.URSL_func_select__ai_label_print__available
+LLOD $3 .URSL_data_available__ai $2
+BRE .URSL_func_select__ai_label_end__print__available $3 0
+INC $3 $2
+OUT %TEXT 91
+OUT %NUMB $1
+OUT %TEXT 93
+OUT %TEXT 32
+MOV $2 $3
+.URSL_func_select__ai_label_print__ai__name
+LLOD $3 .URSL_data_available__ai $2
+BRE .URSL_func_select__ai_label_end__print__ai__name $3 0
+OUT %TEXT $3
+INC $3 $2
+MOV $2 $3
+JMP .URSL_func_select__ai_label_print__ai__name
+.URSL_func_select__ai_label_end__print__ai__name
+OUT %TEXT 32
+OUT %TEXT 65
+OUT %TEXT 73
+OUT %TEXT 10
+INC $3 $1
+INC $1 $2
+MOV $2 $1
+MOV $1 $3
+JMP .URSL_func_select__ai_label_print__available
+.URSL_func_select__ai_label_end__print__available
+IN $1 %NUMB
+IN $2 %TEXT
+PSH $1
+PSH .URSL_data_out__of__bounds
+CAL .URSL_func_print__string
+ADD SP SP 1
+POP $1
+.URSL_func_select__ai_label_input__loop
+IMM $2 0
+.URSL_func_select__ai_label_find__available
+LLOD $3 .URSL_data_available__ai $2
+BRE .URSL_func_select__ai_label_no__available $3 0
+INC $3 $2
+MOV $2 $3
+BNE .URSL_func_select__ai_label_skip__name $1 0
+DEC $3 $2
+LLOD $2 .URSL_data_available__ai $3
+STR .URSL_data_selected__ai $2
+RET
+.URSL_func_select__ai_label_skip__name
+LLOD $3 .URSL_data_available__ai $2
+BRE .URSL_func_select__ai_label_end__skip__name $3 0
+INC $3 $2
+MOV $2 $3
+JMP .URSL_func_select__ai_label_skip__name
+.URSL_func_select__ai_label_end__skip__name
+DEC $3 $1
+INC $1 $2
+MOV $2 $1
+MOV $1 $3
+JMP .URSL_func_select__ai_label_find__available
+.URSL_func_select__ai_label_no__available
+IN $1 %NUMB
+IN $2 %TEXT
+JMP .URSL_func_select__ai_label_input__loop
+
+.URSL_func_smartish__ai
+PSH 79
+CAL .URSL_func_do__triple
+ADD SP SP 1
+BNZ .URSL_func_smartish__ai_label_finished $1
+PSH 88
+CAL .URSL_func_do__triple
+ADD SP SP 1
+BNZ .URSL_func_smartish__ai_label_finished $1
+CAL .URSL_func_random__ai
+.URSL_func_smartish__ai_label_finished
+RET
+
+.URSL_func_state__update
+CAL .URSL_func_print__board
+IMM $1 0
+.URSL_func_state__update_label_check__win__loop
+BGE .URSL_func_state__update_label_exit__check__win $1 24
+LLOD $2 $1 .URSL_data_triples
+LLOD $3 $2 .URSL_data_state
+MOV $2 $3
+BRE .URSL_func_state__update_label_not__matching 32 $2
+ADD $3 $1 1
+LLOD $4 $3 .URSL_data_triples
+LLOD $3 $4 .URSL_data_state
+BNE .URSL_func_state__update_label_not__matching $3 $2
+ADD $3 $1 2
+LLOD $4 $3 .URSL_data_triples
+LLOD $3 $4 .URSL_data_state
+BNE .URSL_func_state__update_label_not__matching $3 $2
+STR .URSL_data_winner $2
+PSH $1
+PSH .URSL_data_winner
+CAL .URSL_func_print__string
+ADD SP SP 1
+POP $1
+HLT
+.URSL_func_state__update_label_not__matching
+ADD $2 $1 3
+MOV $1 $2
+JMP .URSL_func_state__update_label_check__win__loop
+.URSL_func_state__update_label_exit__check__win
+IMM $1 0
+.URSL_func_state__update_label_check__draw__loop
+BGE .URSL_func_state__update_label_its__a__draw $1 8
+LLOD $2 .URSL_data_state $1
+BRE .URSL_func_state__update_label_not__a__draw $2 32
+INC $2 $1
+MOV $1 $2
+JMP .URSL_func_state__update_label_check__draw__loop
+.URSL_func_state__update_label_its__a__draw
+PSH .URSL_data_draw
+CAL .URSL_func_print__string
+ADD SP SP 1
+HLT
+.URSL_func_state__update_label_not__a__draw
+RET
