@@ -10,7 +10,13 @@
 
 Note that in this document, sequences where multiple "instructions" are written one after each other inline, they are formatted like ``inst``; ``inst`` with a semicolon separator, even if the language is supposed to use newlines to separate them.
 
-To use the compiler in this document, first [install rust](https://rustup.rs/), and then just do ``cargo run -- -i input.ursl -o output.urcl`` with the flags at the end there as you like. (``--`` tells cargo to stop parsing arguments, otherwise ``cargo run --help`` would give you help stuff for ``cargo run``) Do ``cargo run -- --help`` for all the goodies that you can customize. Binaries are not distributed in this repo, but you're free to compile it and do whatever with the resulting binaries.
+To use the compiler in this repo, first [install rust](https://rustup.rs/), and then run the following command:
+
+```ps1
+$ cargo install --git "https://github.com/Terrain2/URSL"
+```
+
+Then you can run ``ursl -i input.ursl -o output.urcl -as`` with the flags at the end there as you like. Do ``ursl --help`` for all the goodies that you can customize. Binaries are not distributed in this repo, but you're free to compile it and do whatever with the resulting binaries.
 
 URSL is an abstraction which is somewhat higher than URCL. The 2 main problems it abstracts away is calling conventions, and register allocation. It is very similar to WASM text format and .NET CIL. URSL is a stack-oriented language with functions and label scopes within those functions. It is designed to be as easy as possible to compile to URCL, which is why for example memory instructions are literally 1:1 on URCL's available memory instructions. I plan on using this to compile languages such as .NET CIL and WASM to URCL. Stack machines allow for a simplified parser and binary representation of code, because instructions never take more than one immediate operand, and most only take from the operand stack. They are also somewhat easier to compile *to*, because it allows for very simple representation of nested expressions in reverse polish notation, and lowering of code can just translate to a set of stack instructions, without worrying about such things as temporary registers and using the correct available one, because URSL handles register allocation and ensures it just works. At least, it's supposed to, but this software is provided without warranty.
 
