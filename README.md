@@ -22,7 +22,7 @@ URSL is an abstraction which is somewhat higher than URCL. The 2 main problems i
 
 Just like WASM text and CIL, instructions are written in lowercase. This helps it look sorta like URCL, but obviously different just by the casing. Oh, and also, most instructions are written as actual english words, because i think it's a lot nicer to read, and URSL's primary purpose isn't to be written by a human, so it's not a huge concern for instructions to be short and faster to write. Some are still abbreviated if their name is actually long, but i'm not keeping it to 3 chars.
 
-The stack pointer (SP) and program counter (PC) are entirely opaque to URSL code. Memory is not abstracted in any way for URSL, and it is possible to overwrite the callstack, which will cause issues, obviously. Numeric literals in URSL are always unsigned, because i don't wanna deal with signed number literals in the output. If you want to use negative numbers, you should load them like ``const 0``; ``neg``.
+The stack pointer (SP) and program counter (PC) are entirely opaque to URSL code. Memory is not abstracted in any way for URSL, and it is possible to overwrite the callstack, which will cause issues, obviously. Numeric literals in URSL are always unsigned, because i don't wanna deal with signed number literals in the output. If you want to use negative numbers, you can write them like ``const 0``; ``neg``. Compilers should know the bit width of the output and emit an unsigned literal of the bitwise identical value.
 
 # Headers
 

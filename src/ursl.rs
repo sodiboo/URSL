@@ -248,10 +248,9 @@ pub fn parse_instructions<'a>(
                         unit,
                     }, "Branch without a prefix instruction")
                 });
-                let opcode = if let Instruction::Call(opcode) = previous.instruction && signatures.get(opcode).map(|&(_, is_branch)| is_branch).unwrap_or(false) {
-                    opcode
-                } else {
-                    err!(errors; unit; inst; "", "Branch prefix has no branching variant")
+                let opcode = match previous.instruction {
+                    Instruction::Call(opcode) if signatures.get(opcode).map(|&(_, is_branch)| is_branch).unwrap_or(false) => opcode,
+                    _ => err!(errors; unit; inst; "", "Branch prefix has no branching variant"),
                 };
                 // unwrap should only exist in the above error cases
                 // otherwise, it has already been proven to exist by the actual call implementation
